@@ -15,12 +15,19 @@ SSE 格式化仍由路由层（chat.py）完成，事件类型与顺序契约零
 本模块的决策与事件流语义将原样保留。
 """
 
+import asyncio
+import time
 from dataclasses import dataclass, field
 from typing import Any, AsyncGenerator, List, Optional
 
+from langchain_core.messages import HumanMessage, SystemMessage
+
 from app.ai_service.agent_runner import execute_agent
 from app.ai_service.plan_execute_agent import execute_plan_agent
+from app.ai_service.reflection import build_repair_note, critique_answer
 from app.core.logger_handler import logger
+from app.utils.config import get_reflection_config
+from app.utils.reflection_metrics import record_reflection_metric
 
 
 @dataclass
@@ -64,38 +71,146 @@ async def react_events(ctx: ChatRouteContext, timeout: int) -> AsyncGenerator[di
     """
     ReAct 路径事件流（简单问题 / Plan 降级共用）
 
+    含两层 Reflection：
+    - L2 失败修复轮（Part B §9.3 决策 4）：整体执行失败（error 事件）时拦截
+      错误、回灌失败原因重跑 1 次；no_retry_tools（send_email）失败不自动重试。
+      error 事件仅在最终失败时透传（避免前端 onError 提前关流）。
+    - L1 结果自检（P2 增强 3，Part B 决策 5 原案：分段流式）：stream_done 后
+      轻量模型评判已流出的回答，不合格则纯文本流式输出修正版（草稿已流出，
+      修正版以第二段 response 续接）。
+
     Yields:
-        response / error 事件（error 后终止；stream_done 不转发，与改造前一致）
+        response / reflection(checking|refining|repairing) / error 事件
+        （error 后终止；stream_done 不转发，与改造前一致）
     """
-    async for event in execute_agent(
-        chat_model=ctx.agent_model,
-        user_id=ctx.user_id,
-        user_message=ctx.user_message,
-        system_prompt=ctx.system_prompt,
-        compressed_messages=ctx.compressed_messages,
-        db_session_factory=ctx.db_session_factory,
-        note_service=ctx.note_service,
-        review_service=ctx.review_service,
-        email_service=ctx.email_service,
-        ppt_service=ctx.ppt_service,
-        timeout=timeout,
-        attachment_content=ctx.attachment_content,
-    ):
-        event_type = event.get("type", "")
-        if event_type in ("response", "error"):
-            yield event
-            if event_type == "error":
-                return
-        # ★ 简单路径补转发工具事件（§6.3 第 2 段，行为变更提示见设计方案）：
-        # 此前连 tool_start/tool_end 都不转发，补上后简单对话中的工具状态
-        # （含 generate_ppt_tool 的生成进度）对前端可见
-        elif event_type in ("tool_start", "tool_end", "tool_file"):
-            yield event
-        # ★ 思考过程实时转发（审查 B+C）：深度思考模式下 reasoning_content
-        # 作为 thinking 事件推送，前端显示思考进度（消除零反馈等待焦虑）
-        elif event_type == "thinking":
-            yield event
-        # stream_done 等其余事件不转发（与现状一致）
+    reflection_cfg = get_reflection_config()
+    l2_config = reflection_cfg.get("l2_repair", {})
+    l2_enable = l2_config.get("enable", False)
+    no_retry_tools = set(l2_config.get("no_retry_tools", ["send_email"]))
+    max_repairs = min(int(l2_config.get("max_repair_attempts", 1)), 1)  # 硬顶 1（决策 3 同款兜底）
+
+    # ReAct 路径 L1 配置（复用 trigger.min_answer_chars / critic_timeout）
+    react_l1_enable = reflection_cfg.get("react_l1_enable", False)
+    min_answer_chars = reflection_cfg.get("trigger", {}).get("min_answer_chars", 500)
+    critic_timeout = reflection_cfg.get("critic_timeout", 15)
+
+    repair_note = ""
+    full_response = ""
+    for attempt in range(max_repairs + 1):
+        failed_tool = None
+        error_event = None
+        async for event in execute_agent(
+            chat_model=ctx.agent_model,
+            user_id=ctx.user_id,
+            user_message=ctx.user_message + repair_note,
+            system_prompt=ctx.system_prompt,
+            compressed_messages=ctx.compressed_messages,
+            db_session_factory=ctx.db_session_factory,
+            note_service=ctx.note_service,
+            review_service=ctx.review_service,
+            email_service=ctx.email_service,
+            ppt_service=ctx.ppt_service,
+            timeout=timeout,
+            attachment_content=ctx.attachment_content,
+        ):
+            event_type = event.get("type", "")
+            # 跟踪流内最后失败的工具（供修复轮定向 + no_retry_tools 判定）
+            if event_type == "tool_end" and event.get("error"):
+                failed_tool = event.get("name")
+            if event_type == "response":
+                full_response += event.get("content", "")
+                yield event
+            elif event_type == "error":
+                error_event = event  # 拦截：先决定是否重试，不立即透传
+                break
+            # ★ 简单路径补转发工具事件（§6.3 第 2 段，行为变更提示见设计方案）：
+            # 此前连 tool_start/tool_end 都不转发，补上后简单对话中的工具状态
+            # （含 generate_ppt_tool 的生成进度）对前端可见
+            elif event_type in ("tool_start", "tool_end", "tool_file"):
+                yield event
+            # ★ 思考过程实时转发（审查 B+C）：深度思考模式下 reasoning_content
+            # 作为 thinking 事件推送，前端显示思考进度（消除零反馈等待焦虑）
+            elif event_type == "thinking":
+                yield event
+            elif event_type == "stream_done":
+                full_response = event.get("full_response", full_response)
+            # 其余事件不转发（与现状一致）
+
+        if error_event is None:
+            # 本轮成功（含修复轮成功）→ 记录 L2 结果并进入 L1
+            if repair_note:
+                record_reflection_metric({
+                    "task": "react", "l2_repair_triggered": True,
+                    "l2_repair_success": True,
+                })
+            break
+
+        # 失败 → L2 判定：关闭 / no_retry_tools / 轮次耗尽 → 透传 error 终止
+        if not l2_enable or failed_tool in no_retry_tools or attempt >= max_repairs:
+            if failed_tool in no_retry_tools:
+                logger.warning(f"L2 修复跳过: 工具 {failed_tool} 在 no_retry_tools（避免副作用），error 直接透传")
+            if repair_note:
+                record_reflection_metric({
+                    "task": "react", "l2_repair_triggered": True,
+                    "l2_repair_success": False, "failed_tool": failed_tool,
+                })
+            yield error_event
+            return
+
+        # 修复轮：转 repairing 状态事件（前端计划卡片显示），回灌失败原因重跑
+        logger.info(f"L2 修复: ReAct 执行失败（tool={failed_tool}），重试 {attempt + 1}/{max_repairs}")
+        yield {"type": "reflection", "stage": "repairing", "round": attempt + 1}
+        repair_note = build_repair_note(failed_tool, error_event.get("content", ""))
+        full_response = ""  # 丢弃失败尝试的部分输出，修复轮重新累计
+
+    # ===== ReAct 路径 L1 结果自检（P2 增强 3：分段流式）=====
+    if not react_l1_enable or ctx.plan_model is None:
+        return
+    if len(full_response) < min_answer_chars:
+        return  # 短回答不检（零额外调用）
+
+    yield {"type": "reflection", "stage": "checking", "round": 0}
+    t0 = time.monotonic()
+    verdict = await critique_answer(
+        ctx.plan_model, ctx.user_message,
+        "ReAct 直接回答（无执行计划）",
+        "（ReAct 模式无分步执行结果，请结合用户问题与一般事实校验回答的完整性与诚实性）",
+        full_response, timeout=critic_timeout,
+    )
+    critique_latency_ms = int((time.monotonic() - t0) * 1000)
+
+    refine_rounds = 0
+    if not verdict.passed:
+        # 修正轮：纯文本流式续接（禁工具——Part B 决策 3）
+        refine_rounds = 1
+        yield {"type": "reflection", "stage": "refining", "round": 1}
+        refine_prompt = (
+            f"你之前对用户问题「{ctx.user_message[:500]}」的回答未通过质量评审。\n\n"
+            f"上一版回答：\n{full_response[:4000]}\n\n"
+            f"评审意见（必须修正的问题）：\n{verdict.issues}\n\n"
+            "请输出修正后的完整回答（只输出回答正文，不要解释修改过程）。"
+        )
+        messages = [
+            SystemMessage(content=ctx.system_prompt[:2000]),
+            HumanMessage(content=refine_prompt),
+        ]
+        try:
+            async with asyncio.timeout(timeout):
+                async for chunk in ctx.agent_model.astream(messages):
+                    if hasattr(chunk, "content") and chunk.content:
+                        yield {"type": "response", "content": chunk.content}
+        except asyncio.TimeoutError:
+            logger.warning("ReAct L1 修正超时（草稿已流出，不兜底）")
+        except Exception as e:
+            logger.error(f"ReAct L1 修正失败（草稿已流出，不兜底）: {type(e).__name__}: {e}")
+
+    record_reflection_metric({
+        "task": "react", "triggered": True,
+        "draft_chars": len(full_response),
+        "refine_rounds": refine_rounds,
+        "final_passed": verdict.passed,
+        "critique_latency_ms": [critique_latency_ms],
+    })
 
 
 async def plan_events(
@@ -113,13 +228,16 @@ async def plan_events(
 
     Yields:
         plan_start / plan_step / plan_step_start / plan_step_end /
-        plan_synthesize / plan_complete / tool_start / tool_end / response / error
-        （plan_fallback 事件后接 ReAct 重跑事件；error 后终止）
+        plan_synthesize / plan_complete / reflection / tool_start / tool_end /
+        tool_file / response / error
+        （reflection 为 L1 综合后自检状态事件；plan_fallback 事件后接 ReAct
+        重跑事件；error 后终止）
     """
     forwarded = {
         "plan_start", "plan_step", "plan_step_start", "plan_step_end",
         "plan_synthesize", "plan_complete", "tool_start", "tool_end",
         "tool_file",   # ★ 新增：PPT 生成事件（§6.3 第 2 段）
+        "reflection",  # ★ 新增：L1 综合后自检状态事件（AI对话Reflection反思机制设计方案.md）
     }
     async for event in execute_plan_agent(
         chat_model=ctx.agent_model,

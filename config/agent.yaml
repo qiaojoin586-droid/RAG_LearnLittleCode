@@ -21,6 +21,28 @@ plan_execute:
   enable_parallel: true           # 是否并行执行无依赖步骤
   max_parallel_steps: 3           # 最大并行步骤数
 
+# Reflection 反思机制（L1 综合后自检；设计文档：AI对话Reflection反思机制设计方案.md）
+reflection:
+  enable: true              # 总开关（false 时 Plan-Execute 行为与现状完全一致）
+  critic_model: "light"     # "light"=复用 plan_model（qwen3-flash，快且省）| "main"=主模型
+                            # 注意："main" 模式延迟约 10~15s，仅在 flash 误判率过高时启用（审查 P2-2）
+  critic_timeout: 15        # 批判调用超时（秒），独立预算
+  max_refine_rounds: 1      # 修正轮次上限（代码层硬顶 2）
+  trigger:
+    min_answer_chars: 500   # 草稿 ≥ 500 字符才自检（短回答不检）
+  # L2 工具失败修复（Self-Repair，Part B §9.3 决策 4）：
+  # 整体执行失败（error 事件/异常）时回灌错误原因定向重试；工具级失败由
+  # LangGraph Agent 内建自愈（错误自动反馈模型）
+  l2_repair:
+    enable: true            # 失败重试总开关（false 时失败行为与现状一致）
+    max_repair_attempts: 1  # 修复轮上限（代码层硬顶 1）
+    no_retry_tools:         # 不自动重试的工具（有副作用：避免重复发送）
+      - send_email
+  # ReAct 路径 L1 结果自检（P2 增强 3，Part B 决策 5 原案：分段流式）。
+  # 复用上方 trigger.min_answer_chars / max_refine_rounds / critic_timeout；
+  # 草稿已流出 → 不合格时修正版以第二段 response 续接（纯文本、禁工具）
+  react_l1_enable: true
+
 # 查询分类配置
 classifier:
   # L1 规则层

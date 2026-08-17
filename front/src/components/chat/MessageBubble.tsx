@@ -45,6 +45,10 @@ export interface PlanDisplayState {
   totalSteps: number;
   isComplete: boolean;
   currentTool: string;
+  /** 反思阶段（L1 综合后自检）：'' | 'checking' | 'refining' */
+  reflectStage?: string;
+  /** 反思修正轮次 */
+  reflectRound?: number;
 }
 
 interface Props {
@@ -83,6 +87,8 @@ export default function MessageBubble({ msg, isLast, isStreaming, userAvatar, pl
             totalSteps={plan.totalSteps}
             isComplete={plan.isComplete}
             currentTool={plan.currentTool}
+            reflectStatus={plan.reflectStage}
+            reflectRound={plan.reflectRound}
           />
         )}
         {/* AI 思考加载态：内容为空时显示"正在思考" + 3 个跳动圆点（demo 规格一致）；

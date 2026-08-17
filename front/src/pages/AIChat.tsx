@@ -76,6 +76,9 @@ export default function AIChat() {
   const [planActive, setPlanActive] = useState(false);
   const [planComplete, setPlanComplete] = useState(false);
   const [currentTool, setCurrentTool] = useState('');
+  // 反思状态（L1 综合后自检 + L2 失败修复：checking=反思 / refining=修正 / repairing=修复重试）
+  const [planReflectStage, setPlanReflectStage] = useState<'' | 'checking' | 'refining' | 'repairing'>('');
+  const [planReflectRound, setPlanReflectRound] = useState(0);
 
   // requestAnimationFrame 节流：合并高频 token 更新
   const rafRef = useRef<number | null>(null);
@@ -378,6 +381,9 @@ export default function AIChat() {
             accumulated += content;
             pendingContentRef.current = accumulated;
             scheduleFlush();
+            // 回答开始流出，反思状态使命结束（清空时序 P2-4）
+            setPlanReflectStage('');
+            setPlanReflectRound(0);
           },
           onDone: (newSessionId) => {
             flushPending();
@@ -397,6 +403,9 @@ export default function AIChat() {
             updateLastAssistantMessage(`⚠️ ${msg}`);
             setIsStreaming(false);
             setCurrentTool('');
+            // 异常路径兜底清空反思状态（P2-4）
+            setPlanReflectStage('');
+            setPlanReflectRound(0);
           },
           // Plan-and-Execute 事件回调
           onPlanStart: (goal, totalSteps) => {
@@ -427,6 +436,11 @@ export default function AIChat() {
           onPlanSynthesize: () => {
             // 综合阶段开始，所有步骤已完成
           },
+          onReflection: (stage, round) => {
+            // L1 综合后自检 / L2 失败修复状态（AI对话Reflection反思机制设计方案.md §3.8）
+            setPlanReflectStage(stage as 'checking' | 'refining' | 'repairing');
+            setPlanReflectRound(round);
+          },
           onPlanComplete: (totalSteps, completedSteps) => {
             setPlanTotalSteps(totalSteps);
             setPlanCompletedSteps(completedSteps);
@@ -436,6 +450,9 @@ export default function AIChat() {
             // Plan 失败降级为 ReAct，隐藏进度条
             setPlanActive(false);
             setCurrentTool('');
+            // 降级路径兜底清空反思状态（P2-4）
+            setPlanReflectStage('');
+            setPlanReflectRound(0);
           },
           // 工具调用事件
           onToolStart: (name) => {
@@ -492,6 +509,8 @@ export default function AIChat() {
     totalSteps: planTotalSteps,
     isComplete: planComplete,
     currentTool,
+    reflectStage: planReflectStage,
+    reflectRound: planReflectRound,
   };
 
   const selectedNoteIds = new Set(selectedNotes.map((n) => n.id));
