@@ -428,11 +428,12 @@ def create_agent_tools(
         发送邮件。这是唯一能真正把邮件发送出去的工具：当用户要求将笔记发送到邮箱时，必须调用本工具完成发送，
         不得仅用文字回复代替。支持以 Markdown 或 PDF 附件形式发送。
 
-        调用前请先通过 get_user_info_tools 获取用户邮箱；
-        若用户未绑定邮箱，请先询问用户要发送到的目标邮箱地址。
+        收件人确定规则：用户在对话中明确给出的目标邮箱地址优先（可以发送给任何人的邮箱）；
+        用户未给出地址时，先通过 get_user_info_tools 获取用户本人绑定邮箱作为收件人；
+        仍无邮箱则询问用户。无论哪种情况，发送前必须与用户确认收件人地址。
 
         Args:
-            to: 收件人邮箱地址（必须与用户确认过）
+            to: 收件人邮箱地址（用户明确给出的目标地址，或用户本人绑定邮箱；必须与用户确认过）
             subject: 邮件主题（如 "笔记导出：{笔记标题}"）
             body: 邮件正文（Markdown 格式，建议包含笔记标题、分类/标签元信息和完整内容）
             format: 附件格式："md"（Markdown 附件，默认）/ "pdf"（PDF 附件）/ "text"（仅正文，无附件）
@@ -485,7 +486,7 @@ def create_agent_tools(
             await email_service.send_email(to, subject, body, attachments=attachments)
             _email_send_record(user_id)  # 发送成功后计数（P2-3 限流）
             fmt_label = {"md": "Markdown", "pdf": "PDF", "text": "文本"}.get(format, "Markdown")
-            return f"笔记已成功以{fmt_label}形式发送至 {to}"
+            return f"笔记已成功以{fmt_label}形式发送至 {to}（若收件人长时间未收到，请让其检查垃圾邮件箱）"
         except Exception as e:
             # 捕获所有异常返回友好提示，防止 SMTP 异常冒泡导致 Agent 循环中断
             logger.error(f"邮件发送失败: to={to}, error={e}")

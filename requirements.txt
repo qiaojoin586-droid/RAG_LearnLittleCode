@@ -38,6 +38,8 @@ bcrypt>=4.0.0,<5.0.0
 
 # ========== File Processing ==========
 pymupdf>=1.25.0
+# Markdown → HTML 转换（邮件 PDF 渲染用：表格/嵌套列表/围栏代码块）
+markdown>=3.5.0
 pillow>=11.0.0
 # 注：python-magic-bin 已移除——项目代码零引用（magic bytes 校验为自研 _match_magic），
 # 且该包仅有 Windows wheel，导致 Linux CI 安装 requirements.lock 失败（2026-08-09）
