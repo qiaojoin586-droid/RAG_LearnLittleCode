@@ -44,6 +44,61 @@
   /* 阴影 — 淡蓝色柔影 */
   --shadow-card: 0 2px 8px rgba(22, 119, 255, 0.06);
   --shadow-card-hover: 0 6px 20px rgba(22, 119, 255, 0.12);
+
+  /* ===== v2 主页布局重构补充（缺失变量，此前被引用但未定义）===== */
+  --color-gradient-bg: var(--color-bg);           /* 替代原渐变背景 */
+  --color-sidebar-bg: rgba(255, 255, 255, 0.85);  /* 侧边栏毛玻璃背景 */
+  --color-on-accent: #ffffff;                      /* 强调色上的文字色 */
+  --color-accent-hover: #0d5bd6;                   /* 强调色悬停态 */
+  --color-surface-alt: #f5f8fc;                    /* 次级表面色 */
+  --color-surface: #ffffff;                        /* 表面色（NoteEditor 工具栏等引用） */
+
+  /* 装饰色（低透明度，弱化浮动装饰块） */
+  --color-decor-1: rgba(22, 119, 255, 0.03);
+  --color-decor-2: rgba(22, 119, 255, 0.02);
+  --color-decor-3: rgba(22, 119, 255, 0.02);
+
+  /* 阴影体系（更轻） */
+  --shadow-accent-sm: 0 1px 3px rgba(22, 119, 255, 0.08);
+  --shadow-accent-md: 0 2px 8px rgba(22, 119, 255, 0.10);
+  --shadow-accent-lg: 0 4px 16px rgba(22, 119, 255, 0.12);
+  /* 弹窗阴影（ConfirmDialog / Sessions 弹窗此前引用但未定义） */
+  --shadow-dialog: 0 8px 24px rgba(15, 23, 36, 0.16);
+
+  /* 面板分隔线 */
+  --color-panel-border: #e8edf5;
+
+  /* 顶部导航栏专用 */
+  --color-topbar-bg: rgba(255, 255, 255, 0.92);
+  --color-topbar-border: #e8edf5;
+  --color-search-bg: #f0f4f8;
+  --color-search-border: #d4dff0;
+  --color-search-focus-border: var(--color-accent);
+
+  /* AI 助手浮层专用 */
+  --color-assistant-bg: #ffffff;
+  --color-assistant-border: #e0e7ef;
+  --color-assistant-shadow: 0 8px 32px rgba(0, 0, 0, 0.12);
+  --color-assistant-user-bubble: #e8f0fe;
+  --color-assistant-ai-bubble: #f5f8fc;
+
+  /* 笔记格式徽章 */
+  --color-badge-md-bg: #e8f5e9;
+  --color-badge-md-text: #2e7d32;
+  --color-badge-txt-bg: #e3f2fd;
+  --color-badge-txt-text: #1565c0;
+
+  /* 快捷操作按钮（浅青绿色系，与笔记页分类按钮/标签同源） */
+  --color-quick-action-bg: #f0f7f4;
+  --color-quick-action-text: #1a7a5a;
+  --color-quick-action-border: #c8e6d8;
+
+  /* 笔记页三栏专用（分类标签 / 数量徽标 / 树选中态） */
+  --color-tag-bg: #e6f4f0;
+  --color-tag-text: #1a7a5a;
+  --color-count-badge-bg: #eef1f6;
+  --color-count-badge-text: #5a6a8a;
+  --color-tree-selected: #e8f0fe;
 }
 
 /* ========== 暗色主题 ========== */
@@ -65,6 +120,44 @@
 
   --shadow-card: 0 2px 8px rgba(74, 158, 255, 0.08);
   --shadow-card-hover: 0 6px 20px rgba(74, 158, 255, 0.15);
+
+  /* ===== v2 主页布局重构补充（暗色） ===== */
+  --color-gradient-bg: var(--color-bg);
+  --color-sidebar-bg: rgba(26, 36, 54, 0.9);
+  --color-on-accent: #ffffff;
+  --color-accent-hover: #6db3ff;
+  --color-surface-alt: #1e2d45;
+  --color-surface: #1a2436;
+  --color-panel-border: #2a3a54;
+  --color-decor-1: rgba(74, 158, 255, 0.04);
+  --color-decor-2: rgba(74, 158, 255, 0.03);
+  --color-decor-3: rgba(74, 158, 255, 0.03);
+  --shadow-accent-sm: 0 1px 3px rgba(74, 158, 255, 0.10);
+  --shadow-accent-md: 0 2px 8px rgba(74, 158, 255, 0.12);
+  --shadow-accent-lg: 0 4px 16px rgba(74, 158, 255, 0.15);
+  --shadow-dialog: 0 8px 24px rgba(0, 0, 0, 0.5);
+
+  --color-topbar-bg: rgba(15, 23, 36, 0.95);
+  --color-topbar-border: #2a3a54;
+  --color-search-bg: #1a2436;
+  --color-search-border: #2a3a54;
+  --color-assistant-bg: #1a2436;
+  --color-assistant-border: #2a3a54;
+  --color-assistant-shadow: 0 8px 32px rgba(0, 0, 0, 0.4);
+  --color-assistant-user-bubble: #1a2e4a;
+  --color-assistant-ai-bubble: #1e2d45;
+  --color-badge-md-bg: #1b3a2a;
+  --color-badge-md-text: #66bb6a;
+  --color-badge-txt-bg: #1a2744;
+  --color-badge-txt-text: #64b5f6;
+  --color-quick-action-bg: #1a2e2a;
+  --color-quick-action-text: #66bb6a;
+  --color-quick-action-border: #2a4a3a;
+  --color-tag-bg: #1a2e2a;
+  --color-tag-text: #66bb6a;
+  --color-count-badge-bg: #243248;
+  --color-count-badge-text: #8a9ab8;
+  --color-tree-selected: #1a2e4a;
 }
 
 /* ========== 全局样式 ========== */

@@ -1,98 +1,241 @@
 /**
- * 笔记列表页面（首页）
- * 
- * 功能：
- * 1. 卡片网格展示笔记，置顶笔记带标记
- * 2. 搜索框（300ms 防抖调后端语义搜索）
- * 3. 分类筛选横向选项卡
- * 4. 无限滚动加载（IntersectionObserver）
- * 5. 批量模式（勾选后底部弹出操作栏）
+ * 笔记列表页（v2 三栏式笔记管理界面，融合 test.md）
+ *
+ * 三栏布局（置于 main 内容区，各栏独立滚动，栏间 1px 细边框）：
+ * - 第一栏 CategoryTree（220px）：静态分类树 + 后端 category 过滤 + 数量徽标
+ * - 第二栏 笔记列表（320px）：竖排卡片 NoteCardItem，保留分页/批量/删除，新增收藏星/排序/视图切换
+ * - 第三栏 NotePreviewPanel（自适应）：预览区（本期空状态，决策 D4）
+ *
+ * v2 移除：页面搜索框（由 TopBar 全局搜索承接，阶段四）、分类筛选选项卡（由分类树承接）。
+ * 新增：排序（客户端）/ 视图切换（卡片 ↔ 网格，决策 M1）/ MD-TXT 徽章 / 收藏星切换（is_pinned）。
  */
 
-import { useState, useEffect, useCallback } from 'react';
-import { useNavigate } from 'react-router-dom';
+import { useState, useEffect, useCallback, useMemo } from 'react';
+import { useNavigate, useParams, useLocation } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
 import { toast } from 'sonner';
-import { Plus, Search, FileText, Pin, Trash2, X, CheckSquare } from 'lucide-react';
+import { Plus, CheckSquare, LayoutGrid, Trash2, X, FileText, PanelLeft, ChevronLeft, ChevronRight, Folder } from 'lucide-react';
 import { notesApi } from '../api/notes';
-import { useDebounce } from '../hooks/useDebounce';
 import EmptyState from '../components/common/EmptyState';
 import LoadingSkeleton from '../components/common/LoadingSkeleton';
-import TagBadge from '../components/common/TagBadge';
 import ConfirmDialog from '../components/common/ConfirmDialog';
+import CategoryTree from '../components/layout/CategoryTree';
+import NoteCardItem from '../components/layout/NoteCardItem';
+import NotePreviewPanel from '../components/layout/NotePreviewPanel';
+import NoteEditor from './NoteEditor';
+import { CATEGORY_TREE, type CategoryTreeNode } from '../constants/noteCategoryTree';
 import type { Note } from '../types/api';
-import { NOTE_CATEGORIES, OTHER_CATEGORY, normalizeCategory } from '../constants/noteCategories';
+
+type SortOrder = 'updated' | 'created' | 'title';
+type ViewMode = 'card' | 'grid';
+
+/** 折叠态窄条（v2 交互优化）：展开按钮 + 图标 + 竖向栏目标识 */
+function CollapsedStrip({
+  icon: Icon,
+  label,
+  onExpand,
+}: {
+  icon: React.ElementType;
+  label: string;
+  onExpand: () => void;
+}) {
+  return (
+    <div className="h-full flex flex-col items-center pt-3 pb-4">
+      <button
+        onClick={onExpand}
+        className="p-1.5 rounded-lg text-[var(--color-text-tertiary)]
+          hover:bg-[var(--color-accent-bg)] hover:text-[var(--color-accent)]
+          transition-colors duration-150"
+        title={label}
+      >
+        <ChevronRight size={16} />
+      </button>
+      <div className="flex-1 flex flex-col items-center justify-center gap-2 min-h-0">
+        <Icon size={16} className="text-[var(--color-text-tertiary)]" />
+        <span className="text-xs text-[var(--color-text-secondary)] whitespace-nowrap [writing-mode:vertical-rl] select-none">
+          {label}
+        </span>
+      </div>
+    </div>
+  );
+}
 
 export default function NoteList() {
   const { t } = useTranslation();
   const navigate = useNavigate();
+  const { id } = useParams<{ id: string }>();
+  const location = useLocation();
+  // 新建模式：/notes/new（新建按钮进入）
+  const isNewMode = location.pathname === '/notes/new';
 
   const [notes, setNotes] = useState<Note[]>([]);
   const [loading, setLoading] = useState(true);
-  const [search, setSearch] = useState('');
-  const [category, setCategory] = useState('');
-  const [page, setPage] = useState(1);
   const [total, setTotal] = useState(0);
-  const debouncedSearch = useDebounce(search, 300);
+  const [page, setPage] = useState(1);
 
-  // 批量操作状态
+  // 分类树选中节点（默认"所有笔记"）
+  const [selectedNode, setSelectedNode] = useState<CategoryTreeNode>(CATEGORY_TREE[0]);
+
+  // 排序 / 视图切换（决策 M1）/ 批量 / 删除
+  const [sortOrder, setSortOrder] = useState<SortOrder>('updated');
+  const [viewMode, setViewMode] = useState<ViewMode>('card');
   const [batchMode, setBatchMode] = useState(false);
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
-  // 删除确认弹窗
   const [deleteTarget, setDeleteTarget] = useState<string | 'batch' | null>(null);
 
-  /** 加载笔记列表（reset=true 时从第 1 页开始，用于搜索/分类切换） */
-  const loadNotes = useCallback(async (reset = false) => {
-    setLoading(true);
-    try {
-      const p = reset ? 1 : page;
-      // 有搜索词时走语义搜索接口，否则走普通列表
-      if (debouncedSearch.trim()) {
-        const res = await notesApi.search({ query: debouncedSearch, top_k: 20 });
-        const results = res.data.data.results || [];
-        setNotes(results.map((r) => r.note));
-        setTotal(results.length);
-        setPage(1);
-      } else {
-        const res = await notesApi.list({ page: p, page_size: 20, category: category || undefined });
-        const data = res.data.data;
-        setNotes(reset ? data.notes : [...notes, ...data.notes]);
-        setTotal(data.total);
-        if (!reset) setPage(p + 1);
-      }
-    } catch {
-      // 错误处理
-    } finally {
-      setLoading(false);
-    }
-  }, [page, category, notes, debouncedSearch]);
+  // 移动端：分类树抽屉显隐（<md 时树以 fixed 抽屉展示，见响应式策略 §8.2）
+  const [treeDrawerOpen, setTreeDrawerOpen] = useState(false);
 
-  // 初始加载 + 分类/搜索变化时重新加载（始终重置到第 1 页）
+  // 两栏折叠状态（v2 交互优化：独立折叠、详情区自动加宽；localStorage 持久化）
+  const [treeCollapsed, setTreeCollapsed] = useState(
+    () => localStorage.getItem('notes-tree-collapsed') === '1'
+  );
+  const [listCollapsed, setListCollapsed] = useState(
+    () => localStorage.getItem('notes-list-collapsed') === '1'
+  );
+
+  // 折叠状态持久化：刷新后保持上次布局
   useEffect(() => {
-    loadNotes(true);
-    // loadNotes 闭包捕获 notes/page，加入依赖会引发重复加载循环；
-    // 根因是审查 M1 的列表请求竞态（旧响应覆盖新响应），修复见生产就绪度审查报告 §5-M1
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [category, debouncedSearch]);
+    localStorage.setItem('notes-tree-collapsed', treeCollapsed ? '1' : '0');
+    localStorage.setItem('notes-list-collapsed', listCollapsed ? '1' : '0');
+  }, [treeCollapsed, listCollapsed]);
 
-  // 筛选选项卡：全部 + 标准分类 + 兜底"其他"（不在标准分类中的笔记归入"其他"）
-  const categories = ['', ...NOTE_CATEGORIES, OTHER_CATEGORY];
+  // 右侧详情区选中的笔记（null = 空状态或新建模式；点击卡片 → navigate(/notes/:id) 同步）
+  const [selectedNote, setSelectedNote] = useState<Note | null>(null);
 
-  /** 单条删除笔记 */
-  const handleDelete = async (noteId: string) => {
-    try {
-      await notesApi.delete(noteId);
-      setNotes((prev) => prev.filter((n) => n.id !== noteId));
-      setTotal((prev) => prev - 1);
-      toast.success('删除成功');
-    } catch {
-      toast.error('删除失败');
+  // 路由（/notes/:id、/notes/new）→ 同步选中态：列表已有数据直接用；深链接则拉详情
+  useEffect(() => {
+    if (isNewMode || !id) {
+      setSelectedNote(null);
+      return;
     }
-    setDeleteTarget(null);
-  };
+    const existing = notes.find((n) => n.id === id);
+    if (existing) {
+      setSelectedNote(existing);
+      return;
+    }
+    let cancelled = false;
+    notesApi
+      .detail(id)
+      .then((res) => {
+        if (!cancelled) setSelectedNote(res.data.data);
+      })
+      .catch(() => {
+        if (!cancelled) {
+          toast.error('加载笔记失败');
+          navigate('/notes', { replace: true });
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
+    // notes 不参与依赖（保存/加载后通过 setSelectedNote 直接同步，避免循环）
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [id, isNewMode]);
 
-  /** 批量删除笔记 */
-  const handleBatchDelete = async () => {
+  /** 编辑器保存回调：更新成功后同步列表卡片与选中态 */
+  const handleNoteUpdated = useCallback((updated: Note) => {
+    setNotes((prev) => prev.map((n) => (n.id === updated.id ? { ...n, ...updated } : n)));
+    setSelectedNote(updated);
+  }, []);
+
+  /** 编辑器保存回调：新建成功后插入列表顶部并切换 URL 到新笔记 */
+  const handleNoteCreated = useCallback(
+    (created: Note) => {
+      setNotes((prev) => [created, ...prev]);
+      setTotal((t) => t + 1);
+      setSelectedNote(created);
+      navigate(`/notes/${created.id}`, { replace: true });
+    },
+    [navigate]
+  );
+
+  /** 加载笔记列表（reset=true 从第 1 页开始；静态占位节点直接空列表） */
+  const loadNotes = useCallback(
+    async (reset = false, node?: CategoryTreeNode) => {
+      const target = node ?? selectedNode;
+      setLoading(true);
+      try {
+        // 静态占位节点（无 category 映射）：空列表空态（决策 D3）
+        if (target.key !== 'all' && target.category === undefined) {
+          setNotes([]);
+          setTotal(0);
+          setPage(1);
+        } else {
+          const p = reset ? 1 : page;
+          const res = await notesApi.list({ page: p, page_size: 20, category: target.category });
+          const data = res.data.data;
+          setNotes(reset ? data.notes : [...notes, ...data.notes]);
+          setTotal(data.total);
+          if (!reset) setPage(p + 1);
+        }
+      } catch {
+        // 错误处理（与旧版一致：静默失败，列表保持原状）
+      } finally {
+        setLoading(false);
+      }
+    },
+    [selectedNode, page, notes]
+  );
+
+  // 分类树选择变化时重新加载（重置到第 1 页）。
+  // 注意：loadNotes 依赖 notes/page，加入依赖数组会导致"加载 → notes 变化 →
+  // loadNotes 身份变化 → effect 重跑"的循环，故仅以 selectedNode 为依赖
+  useEffect(() => {
+    loadNotes(true, selectedNode);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedNode]);
+
+  /** 客户端排序（仅作用于已加载列表；分页数据追加后同样参与排序） */
+  const sortedNotes = useMemo(() => {
+    const arr = [...notes];
+    if (sortOrder === 'title') {
+      arr.sort((a, b) => a.title.localeCompare(b.title, 'zh'));
+    } else if (sortOrder === 'created') {
+      arr.sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime());
+    } else {
+      arr.sort((a, b) => new Date(b.updated_at).getTime() - new Date(a.updated_at).getTime());
+    }
+    return arr;
+  }, [notes, sortOrder]);
+
+  /** 收藏/取消收藏（is_pinned 切换，现有字段 + notesApi.update） */
+  const handlePin = useCallback(
+    async (note: Note) => {
+      try {
+        await notesApi.update(note.id, { is_pinned: !note.is_pinned });
+        setNotes((prev) =>
+          prev.map((n) => (n.id === note.id ? { ...n, is_pinned: !note.is_pinned } : n))
+        );
+      } catch {
+        toast.error(t('common.error'));
+      }
+    },
+    [t]
+  );
+
+  /** 单条删除笔记（软删除 → 回收站）；若删除的是正在编辑的笔记则清空详情区 */
+  const handleDelete = useCallback(
+    async (noteId: string) => {
+      try {
+        await notesApi.delete(noteId);
+        setNotes((prev) => prev.filter((n) => n.id !== noteId));
+        setTotal((prev) => prev - 1);
+        toast.success('删除成功');
+      } catch {
+        toast.error('删除失败');
+      }
+      setDeleteTarget(null);
+      if (selectedNote?.id === noteId) {
+        setSelectedNote(null);
+        navigate('/notes', { replace: true });
+      }
+    },
+    [selectedNote, navigate]
+  );
+
+  /** 批量删除笔记；若包含正在编辑的笔记则清空详情区 */
+  const handleBatchDelete = useCallback(async () => {
     if (selectedIds.size === 0) return;
     try {
       await notesApi.batch({ note_ids: Array.from(selectedIds), operation: 'delete' });
@@ -105,17 +248,32 @@ export default function NoteList() {
       toast.error('批量删除失败');
     }
     setDeleteTarget(null);
-  };
+    if (selectedNote && selectedIds.has(selectedNote.id)) {
+      setSelectedNote(null);
+      navigate('/notes', { replace: true });
+    }
+  }, [selectedIds, selectedNote, navigate]);
 
   /** 切换笔记选中状态 */
-  const toggleSelect = (noteId: string) => {
+  const toggleSelect = useCallback((noteId: string) => {
     setSelectedIds((prev) => {
       const next = new Set(prev);
       if (next.has(noteId)) next.delete(noteId);
       else next.add(noteId);
       return next;
     });
-  };
+  }, []);
+
+  /** 打开笔记编辑器（稳定引用，配合 NoteCardItem memo） */
+  const handleOpenNote = useCallback(
+    (note: Note) => navigate(`/notes/${note.id}`),
+    [navigate]
+  );
+
+  /** 请求删除笔记（稳定引用，配合 NoteCardItem memo） */
+  const handleRequestDelete = useCallback((note: Note) => {
+    setDeleteTarget(note.id);
+  }, []);
 
   /** 退出批量模式 */
   const exitBatchMode = () => {
@@ -123,190 +281,267 @@ export default function NoteList() {
     setSelectedIds(new Set());
   };
 
+  /** 详情区是否激活（选中笔记或新建模式） */
+  const detailActive = isNewMode || selectedNote !== null;
+
+  /** 渲染一张笔记卡片（回调均为稳定引用，配合 NoteCardItem 的 React.memo） */
+  const renderNoteCard = (note: Note) => (
+    <NoteCardItem
+      key={note.id}
+      note={note}
+      batchMode={batchMode}
+      isSelected={selectedIds.has(note.id)}
+      onPin={handlePin}
+      onDelete={handleRequestDelete}
+      onToggleSelect={toggleSelect}
+      onOpen={handleOpenNote}
+    />
+  );
+
   return (
-    <div>
-      {/* 顶部操作栏 */}
-      <div className="flex items-center justify-between mb-6">
-        <h1 className="text-2xl font-heading font-bold text-[var(--color-text)]">
-          {t('nav.notes')}
-        </h1>
-        <div className="flex items-center gap-2">
+    <div className="flex h-full">
+      {/* ===== 第一栏：分类管理面板（移动端为抽屉，桌面端内联；可折叠为窄条） ===== */}
+      <div
+        className={`shrink-0 border-r border-[var(--color-panel-border)] bg-[var(--color-sidebar-bg)] md:static transition-[width] duration-300 ease-in-out overflow-hidden ${
+          treeCollapsed ? 'md:w-10' : 'md:w-[220px]'
+        } ${treeDrawerOpen ? 'fixed left-14 top-14 bottom-0 z-50 w-[220px]' : 'hidden md:block'}`}
+      >
+        {/* 折叠时保持挂载（hidden 仅隐藏），展开后树状态（展开节点/数量徽标）不丢失 */}
+        <div className={treeCollapsed ? 'hidden' : 'block h-full'}>
+          <CategoryTree
+            selectedKey={selectedNode.key}
+            onSelect={(node) => {
+              setSelectedNode(node);
+              setTreeDrawerOpen(false);
+            }}
+            onToggleCollapse={() => setTreeCollapsed(true)}
+          />
+        </div>
+        {/* 折叠窄条（仅桌面端展示） */}
+        {treeCollapsed && (
+          <div className="hidden md:block h-full">
+            <CollapsedStrip
+              icon={Folder}
+              label={t('note.categoryManager')}
+              onExpand={() => setTreeCollapsed(false)}
+            />
+          </div>
+        )}
+      </div>
+
+      {/* 移动端分类树遮罩 */}
+      {treeDrawerOpen && (
+        <div
+          className="fixed inset-0 z-40 bg-black/20 md:hidden"
+          onClick={() => setTreeDrawerOpen(false)}
+        />
+      )}
+
+      {/* ===== 第二栏：笔记列表面板（可折叠为窄条；移动端占满，详情激活时移动端隐藏） ===== */}
+      <div className={`${detailActive ? 'hidden md:flex' : 'flex'} flex-1 md:flex-none min-w-0 border-r border-[var(--color-panel-border)] flex-col transition-[width] duration-300 ease-in-out overflow-hidden ${
+        listCollapsed ? 'md:w-10' : 'md:w-[320px]'
+      }`}>
+        {/* 内容区（折叠时桌面端隐藏但保持挂载，展开后列表状态不丢失） */}
+        <div className={`${listCollapsed ? 'md:hidden' : ''} h-full flex flex-col`}>
+        {/* 顶部操作栏 */}
+        <div className="flex items-center justify-between px-3 h-14 border-b border-[var(--color-panel-border)] shrink-0">
+          <div className="flex items-center gap-1.5 min-w-0">
+            {/* 移动端：呼出分类树抽屉（先取消折叠，避免抽屉为空） */}
+            <button
+              onClick={() => {
+                setTreeCollapsed(false);
+                setTreeDrawerOpen(true);
+              }}
+              className="p-1.5 rounded-md text-[var(--color-text-secondary)]
+                hover:bg-[var(--color-surface-alt)] md:hidden shrink-0"
+              title={t('note.categoryManager')}
+            >
+              <PanelLeft size={15} />
+            </button>
+            <h1 className="text-base font-bold text-[var(--color-text)] truncate">
+              {selectedNode.label}
+            </h1>
+          </div>
+
           {batchMode ? (
-            <>
-              <span className="text-sm text-[var(--color-text-secondary)]">
-                已选 {selectedIds.size} 条
+            <div className="flex items-center gap-1.5">
+              <span className="text-xs text-[var(--color-text-secondary)]">
+                {t('note.selectedCount', { count: selectedIds.size })}
               </span>
               <button
                 onClick={() => selectedIds.size > 0 && setDeleteTarget('batch')}
                 disabled={selectedIds.size === 0}
-                className="flex items-center gap-1.5 px-3 py-2 rounded-[var(--radius-md)] bg-[var(--color-danger)] text-white text-sm hover:opacity-90 disabled:opacity-50"
+                className="p-1.5 rounded-md bg-[var(--color-danger)] text-white
+                  hover:opacity-90 disabled:opacity-50 transition-opacity"
+                title={t('common.delete')}
               >
                 <Trash2 size={15} />
-                删除
               </button>
               <button
                 onClick={exitBatchMode}
-                className="flex items-center gap-1.5 px-3 py-2 rounded-[var(--radius-md)] border border-[var(--color-border)] text-[var(--color-text-secondary)] text-sm hover:bg-[var(--color-card)]"
+                className="p-1.5 rounded-md text-[var(--color-text-secondary)]
+                  hover:bg-[var(--color-surface-alt)] transition-colors"
+                title={t('common.cancel')}
               >
                 <X size={15} />
-                取消
               </button>
-            </>
+            </div>
           ) : (
-            <>
+            <div className="flex items-center gap-1">
+              {/* 排序筛选（客户端排序） */}
+              <select
+                value={sortOrder}
+                onChange={(e) => setSortOrder(e.target.value as SortOrder)}
+                className="h-8 px-1.5 rounded-md text-xs
+                  bg-[var(--color-card)] border border-[var(--color-border)]
+                  text-[var(--color-text-secondary)] focus:outline-none cursor-pointer"
+                title={t('note.sort')}
+              >
+                <option value="updated">{t('note.sortUpdated')}</option>
+                <option value="created">{t('note.sortCreated')}</option>
+                <option value="title">{t('note.sortTitle')}</option>
+              </select>
+
+              {/* 视图切换（卡片 ↔ 网格，决策 M1） */}
+              <button
+                onClick={() => setViewMode((v) => (v === 'card' ? 'grid' : 'card'))}
+                className={`p-1.5 rounded-md transition-colors ${
+                  viewMode === 'grid'
+                    ? 'text-[var(--color-accent)] bg-[var(--color-accent-bg)]'
+                    : 'text-[var(--color-text-secondary)] hover:bg-[var(--color-surface-alt)]'
+                }`}
+                title={t('note.viewToggle')}
+              >
+                <LayoutGrid size={15} />
+              </button>
+
+              {/* 批量模式入口（决策 M2 保留） */}
               <button
                 onClick={() => setBatchMode(true)}
-                className="flex items-center gap-1.5 px-3 py-2 rounded-xl border border-[var(--color-border)] text-[var(--color-accent)] text-sm hover:bg-[var(--color-accent-bg)] transition-all duration-200"
+                className="p-1.5 rounded-md text-[var(--color-text-secondary)]
+                  hover:bg-[var(--color-surface-alt)] hover:text-[var(--color-accent)]
+                  transition-colors"
+                title={t('note.batch')}
               >
                 <CheckSquare size={15} />
-                批量
               </button>
+
+              {/* 新建笔记（蓝色主色调） */}
               <button
                 onClick={() => navigate('/notes/new')}
-                className="flex items-center gap-2 px-4 py-2 rounded-[999px] bg-[var(--color-accent)] text-[var(--color-on-accent)] text-sm hover:bg-[var(--color-accent-hover)] active:scale-[0.98] transition-all duration-200 shadow-[var(--shadow-accent-md)]"
+                className="p-1.5 rounded-md bg-[var(--color-accent)] text-white
+                  hover:bg-[var(--color-accent-hover)] transition-colors"
+                title={t('note.create')}
               >
-                <Plus size={16} />
-                {t('note.create')}
+                <Plus size={15} />
               </button>
-            </>
+
+              {/* 折叠本栏（v2 交互优化：收起为窄条，详情区自动加宽） */}
+              <button
+                onClick={() => setListCollapsed(true)}
+                className="p-1.5 rounded-md text-[var(--color-text-tertiary)]
+                  hover:bg-[var(--color-surface-alt)] hover:text-[var(--color-text)]
+                  transition-colors"
+                title={t('note.collapse')}
+              >
+                <ChevronLeft size={15} />
+              </button>
+            </div>
           )}
         </div>
-      </div>
 
-      {/* 搜索框 */}
-      <div className="relative mb-4">
-        <Search size={18} className="absolute left-3 top-1/2 -translate-y-1/2 text-[var(--color-accent)]" />
-        <input
-          type="text"
-          value={search}
-          onChange={(e) => setSearch(e.target.value)}
-          placeholder={t('note.search')}
-          className="w-full pl-10 pr-4 py-2 rounded-xl border border-[var(--color-border)] bg-[var(--color-card)]/80 text-[var(--color-text)] placeholder:text-[var(--color-text-tertiary)] focus:outline-none focus:border-[var(--color-accent)] hover:border-[var(--color-text-tertiary)] transition-all duration-200"
-        />
-      </div>
-
-      {/* 分类筛选 */}
-      <div className="flex gap-2 mb-6 overflow-x-auto pb-2">
-        {categories.map((cat) => (
-          <button
-            key={cat}
-            onClick={() => setCategory(cat)}
-            className={`px-3 py-1.5 rounded-xl text-sm whitespace-nowrap transition-all duration-200 ${
-              category === cat
-                ? 'bg-[var(--color-accent)] text-[var(--color-on-accent)] shadow-[var(--shadow-accent-sm)]'
-                : 'bg-[var(--color-accent-bg)] text-[var(--color-accent)] hover:opacity-80'
-            }`}
-          >
-            {cat || t('note.all')}
-          </button>
-        ))}
-      </div>
-
-      {/* 笔记卡片网格 */}
-      {loading && notes.length === 0 ? (
-        <LoadingSkeleton fullPage />
-      ) : notes.length === 0 ? (
-        <EmptyState
-          icon={<FileText size={48} />}
-          title={t('note.empty')}
-          description={t('note.emptyDesc')}
-          action={
-            <button
-              onClick={() => navigate('/notes/new')}
-              className="px-4 py-2 rounded-[var(--radius-md)] bg-[var(--color-accent)] text-white text-sm"
-            >
-              {t('common.create')}
-            </button>
-          }
-        />
-      ) : (
-        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-          {notes.map((note) => (
-            <div
-              key={note.id}
-              className={`group relative bg-[var(--color-card)] rounded-2xl p-4 border transition-all duration-200 hover:shadow-[var(--shadow-accent-lg)] ${
-                selectedIds.has(note.id)
-                  ? 'border-[var(--color-accent)] ring-1 ring-[var(--color-accent)] shadow-[var(--shadow-card)]'
-                  : 'border-[var(--color-border)] shadow-[var(--shadow-card)]'
-              } ${batchMode ? 'cursor-pointer' : 'cursor-pointer'}`}
-              onClick={() => {
-                if (batchMode) {
-                  toggleSelect(note.id);
-                } else {
-                  navigate(`/notes/${note.id}`);
-                }
-              }}
-            >
-              {/* 批量模式复选框 */}
-              {batchMode && (
-                <div className="absolute top-3 right-3 z-10">
-                  <div className={`w-5 h-5 rounded border-2 flex items-center justify-center transition-colors ${
-                    selectedIds.has(note.id)
-                      ? 'bg-[var(--color-accent)] border-[var(--color-accent)]'
-                      : 'border-[var(--color-border)] bg-[var(--color-card)]'
-                  }`}>
-                    {selectedIds.has(note.id) && (
-                      <svg width="12" height="12" viewBox="0 0 12 12" fill="none">
-                        <path d="M2 6l3 3 5-5" stroke="white" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/>
-                      </svg>
-                    )}
-                  </div>
-                </div>
-              )}
-
-              {/* 单条删除按钮（非批量模式时显示） */}
-              {!batchMode && (
+        {/* 笔记列表（独立滚动） */}
+        <div className="flex-1 overflow-y-auto">
+          {loading && notes.length === 0 ? (
+            <LoadingSkeleton fullPage />
+          ) : notes.length === 0 ? (
+            <EmptyState
+              icon={<FileText size={48} />}
+              title={
+                selectedNode.key !== 'all' && selectedNode.category === undefined
+                  ? t('note.emptyCategory')
+                  : t('note.empty')
+              }
+              description={
+                selectedNode.key !== 'all' && selectedNode.category === undefined
+                  ? t('note.emptyCategoryDesc')
+                  : t('note.emptyDesc')
+              }
+              action={
                 <button
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    setDeleteTarget(note.id);
-                  }}
-                  className="absolute top-3 right-3 z-10 p-1 rounded text-[var(--color-text-tertiary)] hover:text-[var(--color-danger)] hover:bg-[var(--color-danger-bg)] opacity-0 group-hover:opacity-100 transition-opacity"
-                  title="删除"
+                  onClick={() => navigate('/notes/new')}
+                  className="px-4 py-2 rounded-[var(--radius-md)] bg-[var(--color-accent)] text-white text-sm"
                 >
-                  <Trash2 size={14} />
+                  {t('common.create')}
                 </button>
-              )}
-
-              <div className="flex items-center gap-2 mb-2">
-                {note.is_pinned && <Pin size={14} className="text-[var(--color-accent)]" />}
-                <h3 className="font-heading font-medium text-[var(--color-text)] truncate">
-                  {note.title}
-                </h3>
-              </div>
-              <p className="text-sm text-[var(--color-text-secondary)] line-clamp-3 mb-3">
-                {note.content.slice(0, 150)}
-              </p>
-              {note.tags && note.tags.length > 0 && (
-                <div className="flex flex-wrap gap-1">
-                  {note.tags.slice(0, 3).map((tag) => (
-                    <TagBadge key={tag} label={tag} />
-                  ))}
+              }
+            />
+          ) : viewMode === 'card' ? (
+            /* 竖排卡片（test.md 核心形态） */
+            <div className="flex flex-col gap-3 p-3">
+              {sortedNotes.map(renderNoteCard)}
+              {notes.length < total && (
+                <div className="text-center py-2">
+                  <button
+                    onClick={() => loadNotes()}
+                    disabled={loading}
+                    className="px-6 py-2 text-sm text-[var(--color-accent)] border border-[var(--color-border)]
+                      rounded-xl hover:bg-[var(--color-accent-bg)] transition-all duration-200"
+                  >
+                    {loading ? t('common.loading') : t('note.loadMore')}
+                  </button>
                 </div>
               )}
-              <div className="mt-3 text-xs text-[var(--color-text-tertiary)]">
-                {new Date(note.updated_at).toLocaleDateString()}
-                {normalizeCategory(note.category) && ` · ${normalizeCategory(note.category)}`}
-              </div>
             </div>
-          ))}
+          ) : (
+            /* 网格视图（320px 栏内为单列大间距卡片，与卡片视图区分密度） */
+            <div className="grid grid-cols-1 gap-4 p-4">
+              {sortedNotes.map(renderNoteCard)}
+              {notes.length < total && (
+                <div className="text-center py-2">
+                  <button
+                    onClick={() => loadNotes()}
+                    disabled={loading}
+                    className="px-6 py-2 text-sm text-[var(--color-accent)] border border-[var(--color-border)]
+                      rounded-xl hover:bg-[var(--color-accent-bg)] transition-all duration-200"
+                  >
+                    {loading ? t('common.loading') : t('note.loadMore')}
+                  </button>
+                </div>
+              )}
+            </div>
+          )}
         </div>
-      )}
-
-      {/* 加载更多 */}
-      {notes.length < total && (
-        <div className="text-center mt-6">
-          <button
-            onClick={() => loadNotes()}
-            disabled={loading}
-            className="px-6 py-2 text-sm text-[var(--color-accent)] border border-[var(--color-border)] rounded-xl hover:bg-[var(--color-accent-bg)] transition-all duration-200"
-          >
-            {loading ? t('common.loading') : '加载更多'}
-          </button>
         </div>
-      )}
 
-      {/* 删除确认弹窗 */}
+        {/* 折叠窄条（仅桌面端展示） */}
+        {listCollapsed && (
+          <div className="hidden md:block h-full">
+            <CollapsedStrip
+              icon={FileText}
+              label={t('nav.notes')}
+              onExpand={() => setListCollapsed(false)}
+            />
+          </div>
+        )}
+      </div>
+
+      {/* ===== 第三栏：详情区（空状态 ↔ 内联笔记编辑器，无页面跳转） ===== */}
+      <div className={`${detailActive ? 'flex' : 'hidden'} md:flex flex-1 min-w-0 flex-col`}>
+        {detailActive ? (
+          <NoteEditor
+            key={selectedNote?.id ?? 'new'}
+            note={selectedNote}
+            onCreated={handleNoteCreated}
+            onUpdated={handleNoteUpdated}
+            onBackMobile={() => navigate('/notes')}
+          />
+        ) : (
+          <NotePreviewPanel />
+        )}
+      </div>
+
+      {/* 删除确认弹窗（单条；ConfirmDialog 在无 transform 的 main 内正常工作） */}
       <ConfirmDialog
         open={deleteTarget !== null && deleteTarget !== 'batch'}
         title="删除笔记"

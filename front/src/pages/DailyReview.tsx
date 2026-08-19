@@ -82,7 +82,7 @@ export default function DailyReview() {
   const progress = stats ? (stats.completed_today / (stats.completed_today + stats.pending_today)) * 100 : 0;
 
   return (
-    <div>
+    <div className="p-6">
       <div className="flex items-center justify-between mb-6">
         <h1 className="text-2xl font-heading font-bold text-[var(--color-text)]">
           {t('nav.review')}

@@ -1,15 +1,16 @@
 /**
- * 笔记编辑器页面
+ * 笔记编辑器（v2 内联组件版）
  *
- * 功能：
- * 1. 新建/编辑笔记（根据 URL 参数 id 判断）
- * 2. Markdown 分栏编辑 + 实时预览
- * 3. 标签输入、分类选择、置顶
- * 4. 保存/导出笔记
+ * 从全屏路由页改造为可复用内嵌组件，嵌入笔记页三栏的右侧详情区：
+ * - 接收 note 对象（列表已含完整数据，免重复请求）；null = 新建模式
+ * - 移除路由依赖（useParams / useNavigate）与「返回」按钮（列表与详情同屏）
+ * - 编辑/预览分栏、格式工具栏、标签管理、分类选择、置顶、导出、保存全部原样保留
+ *
+ * 父组件以 key={note?.id ?? 'new'} 强制按笔记重挂载，切换笔记时状态自然重置。
+ * 编辑内容高度：编辑器块 flex-1 填充第三栏剩余高度（原 calc(100vh-380px) 适配内联场景）。
  */
 
-import { useState, useEffect, useRef, useCallback } from 'react';
-import { useParams, useNavigate } from 'react-router-dom';
+import { useState, useRef, useCallback } from 'react';
 import { useTranslation } from 'react-i18next';
 import { toast } from 'sonner';
 import { ArrowLeft, Save, Download, Bold, Italic, Heading1, Heading2, Code, List, ListOrdered, Quote, Pencil, Columns, Eye } from 'lucide-react';
@@ -20,99 +21,88 @@ import { normalizeCategory } from '../constants/noteCategories';
 import 'highlight.js/styles/github.css';
 import { notesApi } from '../api/notes';
 import TagInput from '../components/common/TagInput';
-import LoadingSkeleton from '../components/common/LoadingSkeleton';
 import type { Note } from '../types/api';
 
 type EditorMode = 'edit' | 'split' | 'preview';
 
-export default function NoteEditor() {
-  const { id } = useParams<{ id: string }>();
-  const { t } = useTranslation();
-  const navigate = useNavigate();
+interface NoteEditorProps {
+  /** 要编辑的笔记（列表已加载完整数据）；null = 新建模式 */
+  note: Note | null;
+  /** 新建保存成功后回调（父级刷新列表并切换选中） */
+  onCreated: (note: Note) => void;
+  /** 更新保存成功后回调（父级同步列表卡片数据） */
+  onUpdated: (note: Note) => void;
+  /** 移动端返回列表（桌面端无返回按钮，列表与详情同屏） */
+  onBackMobile?: () => void;
+}
 
-  const [loading, setLoading] = useState(!!id);
-  const [title, setTitle] = useState('');
-  const [content, setContent] = useState('');
-  const [tags, setTags] = useState<string[]>([]);
-  const [category, setCategory] = useState('');
-  const [isPinned, setIsPinned] = useState(false);
+/** 检测内容是否为 HTML 格式 */
+const isHtml = (str: string) => /<[a-z][\s\S]*>/i.test(str);
+
+/** HTML 转 Markdown（简易转换，用于兼容旧数据） */
+const htmlToMarkdown = (html: string): string => {
+  let md = html;
+  md = md.replace(/<h1[^>]*>(.*?)<\/h1>/gi, '# $1\n');
+  md = md.replace(/<h2[^>]*>(.*?)<\/h2>/gi, '## $1\n');
+  md = md.replace(/<h3[^>]*>(.*?)<\/h3>/gi, '### $1\n');
+  md = md.replace(/<(strong|b)[^>]*>(.*?)<\/\1>/gi, '**$2**');
+  md = md.replace(/<(em|i)[^>]*>(.*?)<\/\1>/gi, '*$2*');
+  md = md.replace(/<s[^>]*>(.*?)<\/s>/gi, '~~$1~~');
+  md = md.replace(/<code[^>]*>(.*?)<\/code>/gi, '`$1`');
+  md = md.replace(/<pre[^>]*><code[^>]*>([\s\S]*?)<\/code><\/pre>/gi, '```\n$1\n```\n');
+  md = md.replace(/<blockquote[^>]*>([\s\S]*?)<\/blockquote>/gi, (_, inner) => {
+    return inner.replace(/<[^>]*>/g, '').split('\n').map((l: string) => `> ${l}`).join('\n') + '\n';
+  });
+  md = md.replace(/<ul[^>]*>([\s\S]*?)<\/ul>/gi, (_, inner) => {
+    return inner.replace(/<li[^>]*>([\s\S]*?)<\/li>/gi, '- $1\n').trim() + '\n';
+  });
+  md = md.replace(/<ol[^>]*>([\s\S]*?)<\/ol>/gi, (_, inner) => {
+    let idx = 0;
+    return inner.replace(/<li[^>]*>([\s\S]*?)<\/li>/gi, (_match: string, p1: string) => `${++idx}. ${p1}\n`).trim() + '\n';
+  });
+  md = md.replace(/<a[^>]*href="([^"]*)"[^>]*>(.*?)<\/a>/gi, '[$2]($1)');
+  md = md.replace(/<img[^>]*src="([^"]*)"[^>]*alt="([^"]*)"[^>]*\/?>/gi, '![$2]($1)');
+  md = md.replace(/<hr[^>]*\/?>/gi, '\n---\n');
+  md = md.replace(/<p[^>]*>([\s\S]*?)<\/p>/gi, '$1\n\n');
+  md = md.replace(/<br[^>]*\/?>/gi, '\n');
+  md = md.replace(/<[^>]+>/g, '');
+  md = md.replace(/&nbsp;/g, ' ').replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&amp;/g, '&');
+  md = md.replace(/\n{3,}/g, '\n\n');
+  return md.trim();
+};
+
+export default function NoteEditor({ note, onCreated, onUpdated, onBackMobile }: NoteEditorProps) {
+  const { t } = useTranslation();
+
+  // 父组件以 key 重挂载，直接用 props 初始化状态（切换笔记无残留）
+  const [title, setTitle] = useState(note?.title ?? '');
+  const [content, setContent] = useState(() => {
+    const raw = note?.content ?? '';
+    // 兼容旧数据：如果内容是 HTML，自动转换为 Markdown
+    return isHtml(raw) ? htmlToMarkdown(raw) : raw;
+  });
+  const [tags, setTags] = useState<string[]>(note?.tags ?? []);
+  // 分类归一化：非标准分类（如历史脏数据）统一归为"其他"
+  const [category, setCategory] = useState(normalizeCategory(note?.category) || '');
+  const [isPinned, setIsPinned] = useState(note?.is_pinned ?? false);
   const [editorMode, setEditorMode] = useState<EditorMode>('split');
   const textareaRef = useRef<HTMLTextAreaElement>(null);
 
-  /** 检测内容是否为 HTML 格式 */
-  const isHtml = (str: string) => /<[a-z][\s\S]*>/i.test(str);
-
-  /** HTML 转 Markdown（简易转换，用于兼容旧数据） */
-  const htmlToMarkdown = (html: string): string => {
-    let md = html;
-    md = md.replace(/<h1[^>]*>(.*?)<\/h1>/gi, '# $1\n');
-    md = md.replace(/<h2[^>]*>(.*?)<\/h2>/gi, '## $1\n');
-    md = md.replace(/<h3[^>]*>(.*?)<\/h3>/gi, '### $1\n');
-    md = md.replace(/<(strong|b)[^>]*>(.*?)<\/\1>/gi, '**$2**');
-    md = md.replace(/<(em|i)[^>]*>(.*?)<\/\1>/gi, '*$2*');
-    md = md.replace(/<s[^>]*>(.*?)<\/s>/gi, '~~$1~~');
-    md = md.replace(/<code[^>]*>(.*?)<\/code>/gi, '`$1`');
-    md = md.replace(/<pre[^>]*><code[^>]*>([\s\S]*?)<\/code><\/pre>/gi, '```\n$1\n```\n');
-    md = md.replace(/<blockquote[^>]*>([\s\S]*?)<\/blockquote>/gi, (_, inner) => {
-      return inner.replace(/<[^>]*>/g, '').split('\n').map((l: string) => `> ${l}`).join('\n') + '\n';
-    });
-    md = md.replace(/<ul[^>]*>([\s\S]*?)<\/ul>/gi, (_, inner) => {
-      return inner.replace(/<li[^>]*>([\s\S]*?)<\/li>/gi, '- $1\n').trim() + '\n';
-    });
-    md = md.replace(/<ol[^>]*>([\s\S]*?)<\/ol>/gi, (_, inner) => {
-      let idx = 0;
-      return inner.replace(/<li[^>]*>([\s\S]*?)<\/li>/gi, (_match: string, p1: string) => `${++idx}. ${p1}\n`).trim() + '\n';
-    });
-    md = md.replace(/<a[^>]*href="([^"]*)"[^>]*>(.*?)<\/a>/gi, '[$2]($1)');
-    md = md.replace(/<img[^>]*src="([^"]*)"[^>]*alt="([^"]*)"[^>]*\/?>/gi, '![$2]($1)');
-    md = md.replace(/<hr[^>]*\/?>/gi, '\n---\n');
-    md = md.replace(/<p[^>]*>([\s\S]*?)<\/p>/gi, '$1\n\n');
-    md = md.replace(/<br[^>]*\/?>/gi, '\n');
-    md = md.replace(/<[^>]+>/g, '');
-    md = md.replace(/&nbsp;/g, ' ').replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&amp;/g, '&');
-    md = md.replace(/\n{3,}/g, '\n\n');
-    return md.trim();
-  };
-
-  /** 加载笔记详情 */
-  useEffect(() => {
-    if (!id) return;
-    (async () => {
-      try {
-        const res = await notesApi.detail(id);
-        const note: Note = res.data.data;
-        setTitle(note.title);
-        // 兼容旧数据：如果内容是 HTML，自动转换为 Markdown
-        const raw = note.content || '';
-        setContent(isHtml(raw) ? htmlToMarkdown(raw) : raw);
-        setTags(note.tags || []);
-        // 分类归一化：非标准分类（如历史脏数据）统一归为"其他"，编辑保存时顺带规范化数据
-        setCategory(normalizeCategory(note.category) || '');
-        setIsPinned(note.is_pinned);
-      } catch {
-        toast.error('加载笔记失败');
-        navigate('/notes');
-      } finally {
-        setLoading(false);
-      }
-    })();
-    // navigate 为 router 稳定引用
-  }, [id, navigate]);
-
-  /** 保存笔记 */
+  /** 保存笔记（更新 / 新建，业务逻辑与原全屏页一致） */
   const handleSave = async () => {
     if (!title.trim() || !content.trim()) {
       toast.error('标题和内容不能为空');
       return;
     }
     try {
-      if (id) {
-        await notesApi.update(id, { title, content, tags, category, is_pinned: isPinned });
+      if (note) {
+        const res = await notesApi.update(note.id, { title, content, tags, category, is_pinned: isPinned });
         toast.success('保存成功');
+        onUpdated(res.data.data);
       } else {
         const res = await notesApi.create({ title, content, tags, category, is_pinned: isPinned });
         toast.success('创建成功');
-        navigate(`/notes/${res.data.data.id}`, { replace: true });
+        onCreated(res.data.data);
       }
     } catch {
       toast.error(t('common.error'));
@@ -185,19 +175,22 @@ export default function NoteEditor() {
     { icon: <ListOrdered size={15} />, title: '有序列表', action: () => prefixLine('1. ') },
   ];
 
-  if (loading) return <LoadingSkeleton />;
-
   return (
-    <div>
-      {/* 顶部操作栏 */}
-      <div className="flex items-center justify-between mb-6">
-        <button
-          onClick={() => navigate('/notes')}
-          className="flex items-center gap-1 text-[var(--color-text-secondary)] hover:text-[var(--color-accent)] transition-colors"
-        >
-          <ArrowLeft size={18} />
-          {t('common.back')}
-        </button>
+    <div className="flex flex-col h-full p-6 overflow-hidden">
+      {/* 顶部操作栏：移动端返回（md:hidden）+ 导出 + 保存 */}
+      <div className="flex items-center justify-between mb-4 shrink-0">
+        <div>
+          {onBackMobile && (
+            <button
+              onClick={onBackMobile}
+              className="md:hidden flex items-center gap-1 text-[var(--color-text-secondary)]
+                hover:text-[var(--color-accent)] transition-colors"
+            >
+              <ArrowLeft size={18} />
+              {t('common.back')}
+            </button>
+          )}
+        </div>
         <div className="flex items-center gap-2">
           <button
             onClick={handleExport}
@@ -223,11 +216,11 @@ export default function NoteEditor() {
         value={title}
         onChange={(e) => setTitle(e.target.value)}
         placeholder={t('note.title')}
-        className="w-full text-2xl font-heading font-bold bg-transparent border-none outline-none text-[var(--color-text)] mb-4"
+        className="w-full text-2xl font-heading font-bold bg-transparent border-none outline-none text-[var(--color-text)] mb-4 shrink-0"
       />
 
       {/* 标签和分类 */}
-      <div className="flex flex-wrap gap-4 mb-4 p-3 bg-[var(--color-card)]/80 rounded-xl border border-[var(--color-border)] shadow-[var(--shadow-card)]">
+      <div className="flex flex-wrap gap-4 mb-4 p-3 bg-[var(--color-card)]/80 rounded-xl border border-[var(--color-border)] shadow-[var(--shadow-card)] shrink-0">
         <div className="flex-1 min-w-[200px]">
           <label className="block text-xs text-[var(--color-text-tertiary)] mb-1">{t('note.tags')}</label>
           <TagInput tags={tags} onChange={setTags} />
@@ -260,10 +253,10 @@ export default function NoteEditor() {
         </div>
       </div>
 
-      {/* Markdown 分栏编辑器 */}
-      <div className="border border-[var(--color-border)] rounded-xl bg-[var(--color-card)] overflow-hidden shadow-[var(--shadow-card)]">
+      {/* Markdown 分栏编辑器（flex-1 填充第三栏剩余高度） */}
+      <div className="flex-1 min-h-[300px] border border-[var(--color-border)] rounded-xl bg-[var(--color-card)] overflow-hidden shadow-[var(--shadow-card)] flex flex-col">
         {/* 工具栏 */}
-        <div className="flex flex-wrap items-center gap-0.5 px-2 py-1.5 border-b border-[var(--color-border)] bg-[var(--color-surface)]">
+        <div className="flex flex-wrap items-center gap-0.5 px-2 py-1.5 border-b border-[var(--color-border)] bg-[var(--color-surface)] shrink-0">
           {editorMode !== 'preview' && toolbarActions.map((item, i) =>
             'type' in item && item.type === 'divider' ? (
               <div key={i} className="w-px h-5 bg-[var(--color-border)] mx-1" />
@@ -323,15 +316,15 @@ export default function NoteEditor() {
           </div>
         </div>
 
-        {/* 内容区域 */}
-        <div className="flex" style={{ height: 'calc(100vh - 380px)', minHeight: '400px' }}>
+        {/* 内容区域（flex-1 填充，替代原 calc(100vh-380px) 视口高度） */}
+        <div className="flex flex-1 min-h-0">
           {/* 左侧：Markdown 源码编辑 */}
           {editorMode !== 'preview' && (
             <div className={`flex flex-col transition-all duration-300 ${
               editorMode === 'edit' ? 'w-full' : 'w-1/2 border-r border-[var(--color-border)]'
             }`}>
               {editorMode === 'edit' && (
-                <div className="px-3 py-1.5 text-xs text-[var(--color-text-tertiary)] border-b border-[var(--color-border)] bg-[var(--color-surface-alt)] select-none">
+                <div className="px-3 py-1.5 text-xs text-[var(--color-text-tertiary)] border-b border-[var(--color-border)] bg-[var(--color-surface-alt)] select-none shrink-0">
                   编辑
                 </div>
               )}
@@ -340,7 +333,7 @@ export default function NoteEditor() {
                 value={content}
                 onChange={(e) => setContent(e.target.value)}
                 placeholder={t('note.content')}
-                className="flex-1 w-full resize-none p-4 text-sm leading-relaxed text-[var(--color-text)] bg-transparent outline-none font-[var(--font-mono)]"
+                className="flex-1 w-full resize-none p-4 text-sm leading-relaxed text-[var(--color-text)] bg-transparent outline-none font-[var(--font-mono)] min-h-0"
                 spellCheck={false}
               />
             </div>
@@ -352,11 +345,11 @@ export default function NoteEditor() {
               editorMode === 'preview' ? 'w-full' : 'w-1/2'
             }`}>
               {editorMode === 'preview' && (
-                <div className="px-3 py-1.5 text-xs text-[var(--color-text-tertiary)] border-b border-[var(--color-border)] bg-[var(--color-surface-alt)] select-none">
+                <div className="px-3 py-1.5 text-xs text-[var(--color-text-tertiary)] border-b border-[var(--color-border)] bg-[var(--color-surface-alt)] select-none shrink-0">
                   预览
                 </div>
               )}
-              <div className="flex-1 overflow-y-auto p-4">
+              <div className="flex-1 overflow-y-auto p-4 min-h-0">
                 {content.trim() ? (
                   <div className="md-prose">
                     <ReactMarkdown

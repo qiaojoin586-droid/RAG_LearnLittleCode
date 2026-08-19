@@ -153,7 +153,7 @@ export default function RecycleBin() {
   const totalPages = Math.max(1, Math.ceil(total / PAGE_SIZE));
 
   return (
-    <div className="max-w-3xl mx-auto">
+    <div className="max-w-3xl mx-auto p-6">
       {/* 页头 */}
       <div className="flex items-center justify-between mb-6">
         <h1 className="text-2xl font-heading font-bold text-[var(--color-text)]">回收站</h1>

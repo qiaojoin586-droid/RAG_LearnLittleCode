@@ -70,7 +70,7 @@ export default function Settings() {
   };
 
   return (
-    <div className="max-w-2xl mx-auto">
+    <div className="max-w-2xl mx-auto p-6">
       <h1 className="text-2xl font-heading font-bold text-[var(--color-text)] mb-6">
         {t('nav.settings')}
       </h1>

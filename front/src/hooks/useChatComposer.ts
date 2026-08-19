@@ -1,25 +1,22 @@
 /**
- * AI 对话页面
+ * AI 对话编排 Hook（阶段二：从 AIChat.tsx 抽取，供浮层唯一化使用）
  *
- * 功能：
- * 1. SSE 流式对话（思考过程实时展示）
- * 2. Markdown 渲染 AI 回答
- * 3. 消息气泡列表 + 自动滚动
- * 4. 快捷问题按钮
- * 5. 引用笔记 / PPT 模板选择、图片视频附件、Plan 进度卡片
+ * 封装：发送 / SSE 生命周期 / 附件 / 引用笔记 / PPT 模板 /
+ *      Plan 进度 / 反思状态 / 会话列表管理（刷新/切换/重命名/删除）。
  *
- * 审查 ⑤：巨型组件拆分 —— 渲染层组件已拆至 components/chat/：
- *   MessageBubble / MessageContent / PptDownloadCard / TtsAudioCard /
- *   NotePicker / TemplatePicker；本文件保留状态编排与 SSE 生命周期。
+ * 会话语义（不动后端）：发送时读 useSessionStore.currentSessionId
+ * （null = 新会话，后端自动创建并生成标题，chat.py:129/148）；
+ * onDone 回调记录新会话 ID 并刷新会话列表。
+ *
+ * 状态复用：messages / sessions / currentSessionId 等沿用 useSessionStore，
+ * 浮层是唯一消费方（AIChat 页已废弃），无需独立消息字段。
  */
 
-import { useState, useRef, useEffect } from 'react';
-import { useParams, useNavigate } from 'react-router-dom';
+import { useState, useRef, useCallback } from 'react';
 import { useTranslation } from 'react-i18next';
-import { Send, Square, Plus, FileText, X, Brain, Paperclip, Presentation } from 'lucide-react';
-import { useSSE } from '../hooks/useSSE';
+import { toast } from 'sonner';
+import { useSSE } from './useSSE';
 import { useSessionStore } from '../stores/useSessionStore';
-import { useUserStore } from '../stores/useUserStore';
 import { sessionsApi } from '../api/sessions';
 import { endpoints } from '../api/endpoints';
 import { uploadChatFile, deleteChatFile } from '../api/chat';
@@ -27,11 +24,7 @@ import type { ChatMessage, Note, AttachmentMeta } from '../types/api';
 import type { PptTemplateInfo } from '../api/pptTemplates';
 import type { PlanStepData } from '../components/chat/PlanProgressCard';
 import type { PlanDisplayState } from '../components/chat/MessageBubble';
-import MessageBubble from '../components/chat/MessageBubble';
-import AttachmentBar from '../components/chat/AttachmentBar';
 import type { PendingAttachment } from '../components/chat/AttachmentBar';
-import NotePicker from '../components/chat/NotePicker';
-import TemplatePicker from '../components/chat/TemplatePicker';
 
 // 附件限制（与后端 .env 配置保持一致）
 const MAX_IMAGES_PER_MSG = 6;
@@ -39,28 +32,26 @@ const MAX_VIDEOS_PER_MSG = 1;
 const MAX_IMAGE_MB = 10;
 const MAX_VIDEO_MB = 50;
 
-export default function AIChat() {
-  const { sessionId } = useParams<{ sessionId: string }>();
-  const { t } = useTranslation();
-  const navigate = useNavigate();
+export function useChatComposer() {
   const { start, stop } = useSSE();
+  const { t } = useTranslation();
 
   const [input, setInput] = useState('');
   const [isStreaming, setIsStreaming] = useState(false);
   // 思考阶段日志仍在 SSE 回调中收集（保留收集便于将来恢复展示）
   const [, setThinkingStages] = useState<{ stage: string; content: string }[]>([]);
-  // 深度思考模式的实时思考内容（thinking 事件，审查 B+C：显示思考进度消除等待焦虑）
+  // 深度思考模式的实时思考内容（thinking 事件）
   const [thinkingText, setThinkingText] = useState('');
   // 深度思考开关（默认关闭；开启后请求带 enable_thinking=true，后端切换思考模型）
   const [enableThinking, setEnableThinking] = useState(false);
   const [loadingMessages, setLoadingMessages] = useState(false);
-  const messagesEndRef = useRef<HTMLDivElement>(null);
+  const [sessionsLoading, setSessionsLoading] = useState(false);
 
   // 引用笔记状态
   const [selectedNotes, setSelectedNotes] = useState<Note[]>([]);
   const [showNotePicker, setShowNotePicker] = useState(false);
 
-  // PPT 模板选择状态（v1.4，设计方案 §6.5：与笔记一起选中，单选）
+  // PPT 模板选择状态（单选）
   const [selectedTemplate, setSelectedTemplate] = useState<PptTemplateInfo | null>(null);
   const [showTemplatePicker, setShowTemplatePicker] = useState(false);
 
@@ -85,63 +76,28 @@ export default function AIChat() {
   const pendingContentRef = useRef('');
 
   const messages = useSessionStore((s) => s.messages);
+  const sessions = useSessionStore((s) => s.sessions);
+  const currentSessionId = useSessionStore((s) => s.currentSessionId);
   const addMessage = useSessionStore((s) => s.addMessage);
   const setMessages = useSessionStore((s) => s.setMessages);
+  const setSessions = useSessionStore((s) => s.setSessions);
+  const setCurrentSession = useSessionStore((s) => s.setCurrentSession);
+  const setLastSessionId = useSessionStore((s) => s.setLastSessionId);
   const updateLastAssistantMessage = useSessionStore((s) => s.updateLastAssistantMessage);
   const clearCurrentSession = useSessionStore((s) => s.clearCurrentSession);
-  const setLastSessionId = useSessionStore((s) => s.setLastSessionId);
-  const userAvatar = useUserStore((s) => s.userInfo?.avatar);
 
-  /** 进入会话时加载历史消息，或恢复最近会话 */
-  useEffect(() => {
-    if (!sessionId) {
-      // /chat 无 sessionId：通过 getState() 读取最新 lastSessionId（不加入依赖数组，避免状态变化触发 effect）
-      const lastId = useSessionStore.getState().lastSessionId;
-      if (lastId) {
-        navigate(`/chat/${lastId}`, { replace: true });
-        return;
-      }
-      // 无最近会话：真正的新对话，清空状态
-      clearCurrentSession();
-      return;
+  /** 刷新会话列表（历史视图展示 / 新会话创建后调用） */
+  const refreshSessions = useCallback(async () => {
+    setSessionsLoading(true);
+    try {
+      const res = await sessionsApi.list();
+      setSessions(res.data?.data?.sessions ?? []);
+    } catch (err) {
+      console.error('[AIAssistantPanel] 加载会话列表失败:', err);
+    } finally {
+      setSessionsLoading(false);
     }
-
-    // 有 sessionId：记录为最近会话并加载消息
-    setLastSessionId(sessionId);
-
-    let cancelled = false;
-    (async () => {
-      setLoadingMessages(true);
-      try {
-        const res = await sessionsApi.getMessages(sessionId);
-        if (cancelled) return;
-        const msgs = res.data?.data?.messages ?? [];
-        setMessages(msgs);
-      } catch (err) {
-        if (!cancelled) {
-          // 404 表示会话已被删除，清除残留状态并回退到空白新对话
-          const status = (err as { response?: { status?: number } })?.response?.status;
-          if (status === 404) {
-            console.warn('[AIChat] 会话不存在(404)，清除残留状态');
-            clearCurrentSession();
-            navigate('/chat', { replace: true });
-          } else {
-            console.error('[AIChat] 加载历史消息失败:', err);
-          }
-        }
-      } finally {
-        if (!cancelled) setLoadingMessages(false);
-      }
-    })();
-
-    return () => { cancelled = true; };
-    // navigate/setLastSessionId/clearCurrentSession/setMessages 均为稳定引用（router/zustand）
-  }, [sessionId, navigate, setLastSessionId, clearCurrentSession, setMessages]);
-
-  /** 自动滚动到底部 */
-  useEffect(() => {
-    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
-  }, [messages]);
+  }, [setSessions]);
 
   /** 切换笔记选中状态 */
   const toggleNote = (note: Note) => {
@@ -236,7 +192,7 @@ export default function AIChat() {
         );
       })
       .catch((err) => {
-        console.error('[AIChat] 附件上传失败:', err);
+        console.error('[AIAssistantPanel] 附件上传失败:', err);
         setPendingAttachments((prev) =>
           prev.map((a) => (a.localId === att.localId ? { ...a, status: 'error' } : a))
         );
@@ -251,7 +207,7 @@ export default function AIChat() {
     // 已上传且未随消息发送 → 调删除接口（失败由后端孤儿清理兜底）
     if (target.fileId) {
       deleteChatFile(target.fileId).catch((err) =>
-        console.warn('[AIChat] 附件删除失败:', err)
+        console.warn('[AIAssistantPanel] 附件删除失败:', err)
       );
     }
     setPendingAttachments((prev) => prev.filter((a) => a.localId !== localId));
@@ -274,6 +230,9 @@ export default function AIChat() {
       return;
     }
 
+    // 会话 ID：当前会话（null = 新会话，后端自动创建）
+    const sessionId = currentSessionId;
+
     // 构建发送内容：若有引用笔记，将笔记内容作为上下文附加（含 ID 供 Agent 直接更新）
     let messageText = input;
     if (selectedNotes.length > 0) {
@@ -286,11 +245,10 @@ export default function AIChat() {
         .join('\n');
       messageText = `${input}\n\n---\n以下是用户引用的笔记内容，请结合这些内容回答：\n${noteContext}\n\n<referenced_notes>\n${noteRefBlock}\n</referenced_notes>`;
     }
-    // 附加用户选择的 PPT 模板（v1.4，§6.5：后端解析注入 system_prompt，LLM 填入工具参数）
+    // 附加用户选择的 PPT 模板（后端解析注入 system_prompt，LLM 填入工具参数）
     if (selectedTemplate) {
       messageText += `\n\n<ppt_template>\n- ID: ${selectedTemplate.id} | 名称: ${selectedTemplate.name}\n</ppt_template>`;
-      // 发送后清除模板选择（模板是一次性使用，避免「没选模板却用了旧模板」的困惑；
-      // 与笔记选择保留策略不同）
+      // 发送后清除模板选择（模板是一次性使用）
       setSelectedTemplate(null);
     }
 
@@ -366,7 +324,7 @@ export default function AIChat() {
       await start(
         endpoints.chat.query,
         {
-          session_id: sessionId,
+          session_id: sessionId ?? undefined,
           message: messageText,
           enable_thinking: enableThinking,
           attachment_ids: attachmentIds,
@@ -381,7 +339,7 @@ export default function AIChat() {
             accumulated += content;
             pendingContentRef.current = accumulated;
             scheduleFlush();
-            // 回答开始流出，反思状态使命结束（清空时序 P2-4）
+            // 回答开始流出，反思状态使命结束
             setPlanReflectStage('');
             setPlanReflectRound(0);
           },
@@ -389,12 +347,11 @@ export default function AIChat() {
             flushPending();
             setIsStreaming(false);
             setCurrentTool('');
-            // 新会话创建后记录并更新 URL
+            // 新会话创建后记录 ID 并刷新历史会话列表（浮层无需改 URL）
             if (newSessionId) {
               setLastSessionId(newSessionId);
-              if (!sessionId) {
-                navigate(`/chat/${newSessionId}`, { replace: true });
-              }
+              setCurrentSession(newSessionId);
+              refreshSessions();
             }
           },
           onError: (msg) => {
@@ -403,7 +360,6 @@ export default function AIChat() {
             updateLastAssistantMessage(`⚠️ ${msg}`);
             setIsStreaming(false);
             setCurrentTool('');
-            // 异常路径兜底清空反思状态（P2-4）
             setPlanReflectStage('');
             setPlanReflectRound(0);
           },
@@ -450,7 +406,6 @@ export default function AIChat() {
             // Plan 失败降级为 ReAct，隐藏进度条
             setPlanActive(false);
             setCurrentTool('');
-            // 降级路径兜底清空反思状态（P2-4）
             setPlanReflectStage('');
             setPlanReflectRound(0);
           },
@@ -461,7 +416,7 @@ export default function AIChat() {
           onToolEnd: () => {
             setCurrentTool('');
           },
-          // 工具产出文件事件（PPT 生成完成 §6.3 第 3 段 / TTS 语音生成，外部 API 工具文档 §10 C3）
+          // 工具产出文件事件（PPT 生成完成 / TTS 语音生成）
           onToolFile: (info) => {
             // 挂到最后一条 assistant 消息的 attachments（与历史回放统一渲染源；
             // 后端保存时同样写入 attachments_json，切换页面后卡片可恢复）
@@ -498,7 +453,88 @@ export default function AIChat() {
     }
   };
 
-  const quickQuestions = ['Deepseek大模型最新进展', 'AI Agent领域最新进展', '帮我搜索ChatGPT的最新论文并整理成笔记'];
+  /** 新建对话：停止流式并清空当前会话状态 */
+  const handleNewChat = () => {
+    stop();
+    clearCurrentSession();
+    setInput('');
+    setIsStreaming(false);
+    setThinkingText('');
+    setSelectedNotes([]);
+    setSelectedTemplate(null);
+    setPlanGoal('');
+    setPlanSteps([]);
+    setPlanTotalSteps(0);
+    setPlanCompletedSteps(0);
+    setPlanActive(false);
+    setPlanComplete(false);
+    setPlanReflectStage('');
+    setPlanReflectRound(0);
+  };
+
+  /** 加载指定会话的历史消息（切换会话；流式中切换先停止） */
+  const loadSession = useCallback(
+    async (id: string) => {
+      stop();
+      setCurrentSession(id);
+      setLastSessionId(id);
+      setLoadingMessages(true);
+      try {
+        const res = await sessionsApi.getMessages(id);
+        setMessages(res.data?.data?.messages ?? []);
+      } catch (err) {
+        // 404 表示会话已被删除，清除残留状态
+        const status = (err as { response?: { status?: number } })?.response?.status;
+        if (status === 404) {
+          console.warn('[AIAssistantPanel] 会话不存在(404)，清除残留状态');
+          clearCurrentSession();
+          toast.error(t('assistant.sessionNotFound'));
+        } else {
+          console.error('[AIAssistantPanel] 加载历史消息失败:', err);
+          toast.error(t('assistant.loadFailed'));
+        }
+      } finally {
+        setLoadingMessages(false);
+      }
+    },
+    [stop, setCurrentSession, setLastSessionId, setMessages, clearCurrentSession, t]
+  );
+
+  /** 重命名会话（内联编辑提交） */
+  const renameSession = useCallback(
+    async (id: string, title: string) => {
+      try {
+        await sessionsApi.updateTitle(id, { title });
+        setSessions((prev) =>
+          prev.map((s) => (s.id === id ? { ...s, title } : s))
+        );
+      } catch (err) {
+        console.error('[AIAssistantPanel] 重命名会话失败:', err);
+        toast.error(t('assistant.renameFailed'));
+      }
+    },
+    [setSessions, t]
+  );
+
+  /** 删除会话（删除当前会话时清空对话状态） */
+  const deleteSession = useCallback(
+    async (id: string) => {
+      try {
+        await sessionsApi.delete(id);
+        setSessions((prev) => prev.filter((s) => s.id !== id));
+        const { currentSessionId: cur, lastSessionId: last, clearCurrentSession: clearCur } =
+          useSessionStore.getState();
+        if (cur === id || last === id) {
+          clearCur();
+        }
+        toast.success(t('assistant.deleted'));
+      } catch (err) {
+        console.error('[AIAssistantPanel] 删除会话失败:', err);
+        toast.error(t('assistant.deleteFailed'));
+      }
+    },
+    [setSessions, t]
+  );
 
   // 传给 MessageBubble 的 Plan 展示状态
   const planState: PlanDisplayState = {
@@ -515,208 +551,44 @@ export default function AIChat() {
 
   const selectedNoteIds = new Set(selectedNotes.map((n) => n.id));
 
-  return (
-    <div className="flex flex-col h-[calc(100vh-48px)]">
-      {/* 头部 */}
-      <div className="flex items-center justify-between mb-4">
-        <h1 className="text-2xl font-heading font-bold text-[var(--color-text)]">
-          {t('nav.chat')}
-        </h1>
-        <button
-          onClick={() => {
-            clearCurrentSession();
-            navigate('/chat');
-          }}
-          className="flex items-center gap-1.5 px-3 py-1.5 text-sm rounded-[var(--radius-md)] border border-[var(--color-border)] text-[var(--color-text-secondary)] hover:bg-[var(--color-accent-bg)] hover:text-[var(--color-accent)] transition-colors"
-          title="新建对话"
-        >
-          <Plus size={16} />
-          <span>新对话</span>
-        </button>
-      </div>
-
-      {/* 消息列表 */}
-      <div className="flex-1 overflow-y-auto space-y-4 mb-4">
-        {loadingMessages ? (
-          <div className="text-center py-16">
-            <p className="text-[var(--color-text-tertiary)]">{t('common.loading')}</p>
-          </div>
-        ) : messages.length === 0 && !sessionId ? (
-          <div className="text-center py-16">
-            <p className="text-[var(--color-text-tertiary)] mb-4">💡 快捷问题</p>
-            <div className="flex flex-wrap justify-center gap-2">
-              {quickQuestions.map((q) => (
-                <button
-                  key={q}
-                  onClick={() => { setInput(q); }}
-                  className="px-3 py-1.5 text-sm rounded-full border border-[var(--color-border)] text-[var(--color-text-secondary)] hover:bg-[var(--color-accent-bg)] hover:text-[var(--color-accent)]"
-                >
-                  {q}
-                </button>
-              ))}
-            </div>
-          </div>
-        ) : null}
-
-        {messages.map((msg, idx) => (
-          <MessageBubble
-            key={msg.id}
-            msg={msg}
-            isLast={idx === messages.length - 1}
-            isStreaming={isStreaming}
-            userAvatar={userAvatar}
-            plan={planState}
-            thinkingText={thinkingText}
-          />
-        ))}
-        <div ref={messagesEndRef} />
-      </div>
-
-      {/* 输入区 */}
-      <div className="relative flex gap-2">
-        {/* 附件上传按钮（📎） */}
-        <button
-          onClick={() => fileInputRef.current?.click()}
-          disabled={isStreaming}
-          className={`flex-shrink-0 px-3 py-2.5 rounded-[var(--radius-md)] border transition-colors ${
-            pendingAttachments.length > 0
-              ? 'border-[var(--color-accent)] text-[var(--color-accent)] bg-[var(--color-accent-bg)]'
-              : 'border-[var(--color-border)] text-[var(--color-text-secondary)] hover:bg-[var(--color-accent-bg)] hover:text-[var(--color-accent)]'
-          } disabled:opacity-50`}
-          title="上传图片/视频"
-        >
-          <Paperclip size={18} />
-        </button>
-        {/* 隐藏的文件选择器（图片/视频，可多选） */}
-        <input
-          ref={fileInputRef}
-          type="file"
-          accept="image/*,video/*"
-          multiple
-          hidden
-          onChange={handleFileSelect}
-        />
-
-        {/* 深度思考开关 */}
-        <button
-          onClick={() => setEnableThinking(!enableThinking)}
-          className={`flex-shrink-0 px-3 py-2.5 rounded-[var(--radius-md)] border transition-colors text-xs font-medium ${
-            enableThinking
-              ? 'border-[var(--color-accent)] text-[var(--color-accent)] bg-[var(--color-accent-bg)]'
-              : 'border-[var(--color-border)] text-[var(--color-text-secondary)] hover:bg-[var(--color-accent-bg)] hover:text-[var(--color-accent)]'
-          }`}
-          title="深度思考：回答质量更高但响应更慢"
-        >
-          <Brain size={16} className="inline-block mr-1 align-[-3px]" />
-          深度思考
-        </button>
-
-        {/* 引用笔记按钮 */}
-        <button
-          onClick={() => setShowNotePicker((v) => !v)}
-          className={`flex-shrink-0 px-3 py-2.5 rounded-[var(--radius-md)] border transition-colors ${
-            showNotePicker || selectedNotes.length > 0
-              ? 'border-[var(--color-accent)] text-[var(--color-accent)] bg-[var(--color-accent-bg)]'
-              : 'border-[var(--color-border)] text-[var(--color-text-secondary)] hover:bg-[var(--color-accent-bg)] hover:text-[var(--color-accent)]'
-          }`}
-          title="引用笔记"
-        >
-          <FileText size={18} />
-        </button>
-
-        {/* PPT 模板按钮（v1.4：与笔记一起选中，生成 PPT 时使用） */}
-        <button
-          onClick={() => setShowTemplatePicker((v) => !v)}
-          className={`flex-shrink-0 px-3 py-2.5 rounded-[var(--radius-md)] border transition-colors ${
-            showTemplatePicker || selectedTemplate
-              ? 'border-[var(--color-accent)] text-[var(--color-accent)] bg-[var(--color-accent-bg)]'
-              : 'border-[var(--color-border)] text-[var(--color-text-secondary)] hover:bg-[var(--color-accent-bg)] hover:text-[var(--color-accent)]'
-          }`}
-          title="选择 PPT 模板"
-        >
-          <Presentation size={18} />
-        </button>
-
-        {/* PPT 模板选择面板（单选；懒加载模板列表） */}
-        <TemplatePicker
-          open={showTemplatePicker}
-          onClose={() => setShowTemplatePicker(false)}
-          selected={selectedTemplate}
-          onSelect={toggleTemplate}
-        />
-
-        {/* 笔记选择面板 */}
-        <NotePicker
-          open={showNotePicker}
-          onClose={() => setShowNotePicker(false)}
-          selectedIds={selectedNoteIds}
-          onToggle={toggleNote}
-        />
-
-        <input
-          type="text"
-          value={input}
-          onChange={(e) => setInput(e.target.value)}
-          onKeyDown={(e) => e.key === 'Enter' && handleSend()}
-          placeholder={t('chat.placeholder')}
-          className="flex-1 px-4 py-2.5 rounded-[var(--radius-md)] border border-[var(--color-border)] bg-[var(--color-card)] text-[var(--color-text)] focus:outline-none focus:ring-2 focus:ring-[var(--color-accent)]"
-          disabled={isStreaming}
-        />
-        {isStreaming ? (
-          <button
-            onClick={stop}
-            className="px-4 py-2.5 rounded-[var(--radius-md)] bg-[var(--color-danger)] text-white hover:opacity-90"
-          >
-            <Square size={18} />
-          </button>
-        ) : (
-          <button
-            onClick={handleSend}
-            disabled={
-              (!input.trim() &&
-                pendingAttachments.filter((a) => a.status === 'done' && a.fileId).length === 0) ||
-              pendingAttachments.some((a) => a.status === 'uploading')
-            }
-            className="px-4 py-2.5 rounded-[var(--radius-md)] bg-[var(--color-accent)] text-white hover:opacity-90 disabled:opacity-50"
-          >
-            <Send size={18} />
-          </button>
-        )}
-      </div>
-
-      {/* 附件预览条（输入框下方，发送后清空） */}
-      <AttachmentBar items={pendingAttachments} onRemove={removeAttachment} />
-
-      {/* 引用笔记标签（输入框下方） */}
-      {selectedNotes.length > 0 && (
-        <div className="flex flex-wrap gap-1.5 mt-2">
-          {selectedNotes.map((note) => (
-            <span
-              key={note.id}
-              className="inline-flex items-center gap-1 px-2 py-1 text-xs rounded-[var(--radius-md)] bg-[var(--color-accent-bg)] text-[var(--color-accent)] border border-[var(--color-accent)]/20"
-            >
-              <FileText size={12} />
-              <span className="max-w-[120px] truncate">{note.title}</span>
-              <button onClick={() => removeNote(note.id)} className="hover:opacity-70">
-                <X size={12} />
-              </button>
-            </span>
-          ))}
-        </div>
-      )}
-
-      {/* PPT 模板标签（v1.4，输入框下方） */}
-      {selectedTemplate && (
-        <div className="flex flex-wrap gap-1.5 mt-2">
-          <span className="inline-flex items-center gap-1 px-2 py-1 text-xs rounded-[var(--radius-md)] bg-[var(--color-accent-bg)] text-[var(--color-accent)] border border-[var(--color-accent)]/20">
-            <Presentation size={12} />
-            <span className="max-w-[160px] truncate">模板：{selectedTemplate.name}</span>
-            <button onClick={() => setSelectedTemplate(null)} className="hover:opacity-70">
-              <X size={12} />
-            </button>
-          </span>
-        </div>
-      )}
-    </div>
-  );
+  return {
+    // 输入与流式状态
+    input,
+    setInput,
+    isStreaming,
+    stopStreaming: stop,
+    enableThinking,
+    setEnableThinking,
+    thinkingText,
+    loadingMessages,
+    sessionsLoading,
+    // 附件
+    pendingAttachments,
+    fileInputRef,
+    handleFileSelect,
+    removeAttachment,
+    // 引用笔记 / PPT 模板
+    selectedNotes,
+    toggleNote,
+    removeNote,
+    selectedNoteIds,
+    showNotePicker,
+    setShowNotePicker,
+    selectedTemplate,
+    toggleTemplate,
+    showTemplatePicker,
+    setShowTemplatePicker,
+    // 消息与会话
+    messages,
+    sessions,
+    currentSessionId,
+    planState,
+    // 动作
+    handleSend,
+    handleNewChat,
+    refreshSessions,
+    loadSession,
+    renameSession,
+    deleteSession,
+  };
 }
