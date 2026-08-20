@@ -176,22 +176,27 @@ export default function NoteEditor({ note, onCreated, onUpdated, onBackMobile }:
   ];
 
   return (
-    <div className="flex flex-col h-full p-6 overflow-hidden">
-      {/* 顶部操作栏：移动端返回（md:hidden）+ 导出 + 保存 */}
-      <div className="flex items-center justify-between mb-4 shrink-0">
-        <div>
-          {onBackMobile && (
-            <button
-              onClick={onBackMobile}
-              className="md:hidden flex items-center gap-1 text-[var(--color-text-secondary)]
-                hover:text-[var(--color-accent)] transition-colors"
-            >
-              <ArrowLeft size={18} />
-              {t('common.back')}
-            </button>
-          )}
-        </div>
-        <div className="flex items-center gap-2">
+    <div className="flex flex-col h-full px-4 py-3 overflow-hidden">
+      {/* 顶部栏（同行布局优化）：移动端返回 + 标题（左，flex-1）+ 导出/保存（右），垂直居中 */}
+      <div className="flex items-center gap-3 mb-3 shrink-0">
+        {onBackMobile && (
+          <button
+            onClick={onBackMobile}
+            className="md:hidden flex items-center gap-1 text-[var(--color-text-secondary)]
+              hover:text-[var(--color-accent)] transition-colors shrink-0"
+          >
+            <ArrowLeft size={18} />
+            {t('common.back')}
+          </button>
+        )}
+        <input
+          type="text"
+          value={title}
+          onChange={(e) => setTitle(e.target.value)}
+          placeholder={t('note.title')}
+          className="flex-1 min-w-0 text-2xl font-heading font-bold bg-transparent border-none outline-none text-[var(--color-text)]"
+        />
+        <div className="flex items-center gap-2 shrink-0">
           <button
             onClick={handleExport}
             className="flex items-center gap-2 px-4 py-2 rounded-xl border border-[var(--color-border)] text-[var(--color-accent)] text-sm hover:bg-[var(--color-accent-bg)] transition-all duration-200"
@@ -210,17 +215,8 @@ export default function NoteEditor({ note, onCreated, onUpdated, onBackMobile }:
         </div>
       </div>
 
-      {/* 标题输入 */}
-      <input
-        type="text"
-        value={title}
-        onChange={(e) => setTitle(e.target.value)}
-        placeholder={t('note.title')}
-        className="w-full text-2xl font-heading font-bold bg-transparent border-none outline-none text-[var(--color-text)] mb-4 shrink-0"
-      />
-
-      {/* 标签和分类 */}
-      <div className="flex flex-wrap gap-4 mb-4 p-3 bg-[var(--color-card)]/80 rounded-xl border border-[var(--color-border)] shadow-[var(--shadow-card)] shrink-0">
+      {/* 标签和分类（随内容区同步拉宽） */}
+      <div className="flex flex-wrap gap-4 mb-3 p-3 bg-[var(--color-card)]/80 rounded-xl border border-[var(--color-border)] shadow-[var(--shadow-card)] shrink-0">
         <div className="flex-1 min-w-[200px]">
           <label className="block text-xs text-[var(--color-text-tertiary)] mb-1">{t('note.tags')}</label>
           <TagInput tags={tags} onChange={setTags} />
