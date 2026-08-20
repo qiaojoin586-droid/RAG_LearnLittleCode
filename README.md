@@ -29,16 +29,6 @@
 
 ## 🖼️ 界面预览
 
-<!-- ================================================================
-     截图区（预留空间，请手动补充）
-     👉 将运行截图放入 docs/screenshots/ 目录，然后复制下面的 <img>
-        标签替换对应的占位单元格即可。
-     示例：
-     <img src="docs/screenshots/chat.png" alt="AI 对话" width="48%"/>
-     <img src="docs/screenshots/notes.png" alt="笔记管理" width="48%"/>
-     <img src="docs/screenshots/login.png" alt="登录注册" width="48%"/>
-     <img src="docs/screenshots/plan.png" alt="Plan-and-Execute" width="48%"/>
-================================================================= -->
 
 <div align="center">
 <table>
