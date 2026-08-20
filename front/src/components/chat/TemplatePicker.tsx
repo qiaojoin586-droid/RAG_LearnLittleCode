@@ -9,6 +9,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { Presentation, X } from 'lucide-react';
 import { pptTemplatesApi, type PptTemplateInfo } from '../../api/pptTemplates';
+import { useFlipAlignment } from '../../hooks/useFlipAlignment';
 
 interface Props {
   open: boolean;
@@ -22,6 +23,9 @@ export default function TemplatePicker({ open, onClose, selected, onSelect }: Pr
   const [templates, setTemplates] = useState<PptTemplateInfo[]>([]);
   const [loading, setLoading] = useState(false);
   const panelRef = useRef<HTMLDivElement>(null);
+
+  // 视口边界检测：右边界超视口时翻转对齐（AI 浮层贴着屏幕右缘，左对齐会出屏）
+  const alignRight = useFlipAlignment(open, panelRef);
 
   // 打开时懒加载模板列表
   useEffect(() => {
@@ -51,7 +55,9 @@ export default function TemplatePicker({ open, onClose, selected, onSelect }: Pr
   return (
     <div
       ref={panelRef}
-      className="absolute bottom-full mb-2 left-0 w-72 max-h-64 overflow-hidden rounded-[var(--radius-md)] border border-[var(--color-border)] bg-[var(--color-card)] shadow-lg z-10 flex flex-col"
+      className={`absolute bottom-full mb-2 w-72 max-w-[80vw] max-h-64 overflow-hidden rounded-[var(--radius-md)] border border-[var(--color-border)] bg-[var(--color-card)] shadow-lg z-10 flex flex-col ${
+        alignRight ? 'right-0' : 'left-0'
+      }`}
     >
       <div className="flex items-center gap-2 px-3 py-2 border-b border-[var(--color-border)]">
         <Presentation size={14} className="text-[var(--color-text-tertiary)]" />
