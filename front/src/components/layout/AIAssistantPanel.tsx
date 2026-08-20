@@ -21,7 +21,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import {
-  History, Plus, X, Search, FileText, HelpCircle, Sparkles, Send, Square,
+  History, Plus, X, Search, FileText, HelpCircle, Send, Square,
   Brain, Paperclip, Presentation, Trash2, Pencil, RefreshCw, MessageSquare, Check,
 } from 'lucide-react';
 import { useChatComposer } from '../../hooks/useChatComposer';
@@ -270,11 +270,14 @@ export default function AIAssistantPanel({ isVisible, view, onViewChange, onClos
       aria-hidden={!isVisible}
     >
       {/* 头部：角色问候 + 快捷操作 + 视图切换 / 新建 / 关闭 */}
-      <div className="px-4 py-3 border-b border-[var(--color-assistant-border)] shrink-0">
+      <div
+        className="px-4 py-3 border-b border-[var(--color-assistant-border)] shrink-0"
+        style={{ background: 'radial-gradient(ellipse 120% 100% at 50% 0%, rgba(74,158,255,0.07) 0%, transparent 70%)' }}
+      >
         <div className="flex items-center gap-3 mb-2.5">
-          {/* Cici 角色头像 */}
-          <div className="w-10 h-10 rounded-full bg-[var(--color-quick-action-bg)] flex items-center justify-center shrink-0">
-            <Sparkles size={20} className="text-[var(--color-quick-action-text)]" />
+          {/* 小云云角色头像 */}
+          <div className="w-10 h-10 rounded-full overflow-hidden shrink-0">
+            <img src="/avatars/xiaoyunyun.png" alt="小云云" className="w-full h-full object-cover" />
           </div>
           <div className="flex-1 min-w-0">
             <h3 className="text-base font-bold text-[var(--color-text)]">{t('assistant.title')}</h3>
@@ -363,14 +366,17 @@ export default function AIAssistantPanel({ isVisible, view, onViewChange, onClos
                 <p className="text-[var(--color-text-tertiary)]">{t('common.loading')}</p>
               </div>
             ) : chat.messages.length === 0 ? (
-              /* 空状态：欢迎语 + 快捷问题 + 功能介绍（480px 纵向紧凑布局） */
               <div className="flex flex-col items-center justify-center h-full max-w-sm mx-auto">
                 {/* 欢迎区域 */}
                 <div className="text-center mb-6">
-                  <div className="w-14 h-14 rounded-2xl bg-[var(--color-quick-action-bg)] flex items-center justify-center mx-auto mb-3">
-                    <Sparkles size={28} className="text-[var(--color-quick-action-text)]" />
+                  <div className="relative mx-auto mb-4 w-20 h-20">
+                    {/* 头像光晕背景 */}
+                    <div className="absolute inset-0 rounded-full bg-gradient-to-br from-[#4a9eff]/20 to-[#4a9eff]/5 blur-xl" />
+                    <div className="relative w-20 h-20 rounded-full overflow-hidden ring-2 ring-[#4a9eff]/20 ring-offset-2 ring-offset-[var(--color-assistant-bg)]">
+                      <img src="/avatars/xiaoyunyun.png" alt="小云云" className="w-full h-full object-cover" />
+                    </div>
                   </div>
-                  <h2 className="text-xl font-bold text-[var(--color-text)] mb-1.5">{t('assistant.emptyTitle')}</h2>
+                  <h2 className="text-xl font-bold mb-1.5 bg-gradient-to-r from-[#1a2a4a] to-[#4a9eff] bg-clip-text text-transparent">{t('assistant.emptyTitle')}</h2>
                   <p className="text-xs text-[var(--color-text-secondary)]">{t('assistant.emptyDesc')}</p>
                 </div>
 
@@ -402,7 +408,7 @@ export default function AIAssistantPanel({ isVisible, view, onViewChange, onClos
                     return (
                       <div
                         key={f.key}
-                        className="flex items-center gap-3 p-3 rounded-xl bg-[var(--color-card)] border border-[var(--color-border)]"
+                        className="flex items-center gap-3 p-3 rounded-xl bg-[var(--color-card)] border border-[var(--color-border)] transition-all duration-200 hover:shadow-[var(--shadow-accent-md)] hover:border-[var(--color-assistant-ai-bubble-border)] hover:-translate-y-0.5 cursor-default"
                       >
                         <Icon size={18} className="text-[var(--color-accent)] shrink-0" />
                         <div className="min-w-0">

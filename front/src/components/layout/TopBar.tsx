@@ -10,7 +10,7 @@
  */
 
 import { useTranslation } from 'react-i18next';
-import { Search, Sparkles } from 'lucide-react';
+import { Search } from 'lucide-react';
 import UserAvatarMenu from './UserAvatarMenu';
 
 interface TopBarProps {
@@ -69,7 +69,7 @@ export default function TopBar({ assistantVisible, onToggleAssistant, onGlobalSe
                 : 'text-[var(--color-quick-action-text)] bg-[var(--color-quick-action-bg)] border border-[var(--color-quick-action-border)] hover:opacity-90'
             }`}
         >
-          <Sparkles size={16} />
+          <img src="/avatars/xiaoyunyun.png" alt="小云云" className="w-4 h-4 rounded-full object-cover" />
           <span>{t('topbar.assistant')}</span>
         </button>
         <UserAvatarMenu />

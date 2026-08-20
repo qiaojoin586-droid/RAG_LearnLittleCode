@@ -94,17 +94,17 @@ export default function MessageBubble({ msg, isLast, isStreaming, userAvatar, pl
   const isUser = msg.role === 'user';
 
   return (
-    <div className={`flex items-start gap-2 ${isUser ? 'justify-end' : 'justify-start'}`}>
+    <div className={`flex items-start gap-2 ${isUser ? 'justify-end' : 'justify-start'} ai-msg-enter`}>
       {!isUser && (
-        <div className="flex-shrink-0 w-8 h-8 rounded-full flex items-center justify-center bg-[var(--color-accent-bg)]">
-          <span role="img" aria-label="AI 助手" className="text-[18px] leading-none">🤖</span>
+        <div className="flex-shrink-0 w-8 h-8 rounded-full overflow-hidden ring-2 ring-[#4a9eff]/15 shadow-[0_0_8px_rgba(74,158,255,0.12)]">
+          <img src="/avatars/xiaoyunyun.png" alt="小云云" className="w-full h-full object-cover" />
         </div>
       )}
       <div className={`max-w-[80%] p-3 rounded-[var(--radius-md)] ${
         isUser
           ? 'bg-[var(--color-accent)] text-white'
-          : 'bg-[var(--color-card)] border border-[var(--color-border)] text-[var(--color-text)]'
-      }`}>
+          : 'border-l-[3px] border-l-[#4a9eff]/40 text-[var(--color-text)]'
+      }`} style={!isUser ? { background: 'var(--color-assistant-ai-bubble)', borderLeftColor: 'var(--color-assistant-ai-bubble-border)' } : undefined}>
         {/* Plan 进度卡片（仅在最后一条 AI 消息上显示） */}
         {!isUser && isLast && plan.active && (
           <PlanProgressCard
