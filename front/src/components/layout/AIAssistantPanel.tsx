@@ -260,7 +260,7 @@ export default function AIAssistantPanel({ isVisible, view, onViewChange, onClos
   return (
     <aside
       className={`fixed top-14 right-0 bottom-0 w-[480px] max-w-full border-l border-[var(--color-assistant-border)]
-        transition-transform duration-300 ease-in-out flex flex-col
+        transition-transform duration-300 ease-in-out flex flex-col overflow-hidden
         ${isVisible ? 'translate-x-0' : 'translate-x-full'}`}
       style={{
         zIndex: 90,
@@ -271,17 +271,20 @@ export default function AIAssistantPanel({ isVisible, view, onViewChange, onClos
     >
       {/* 头部：角色问候 + 快捷操作 + 视图切换 / 新建 / 关闭 */}
       <div
-        className="px-4 py-3 border-b border-[var(--color-assistant-border)] shrink-0"
-        style={{ background: 'radial-gradient(ellipse 120% 100% at 50% 0%, rgba(74,158,255,0.07) 0%, transparent 70%)' }}
+        className="px-4 py-3 border-b shrink-0 relative"
+        style={{
+          background: 'var(--color-assistant-header-bg)',
+          borderBottomColor: 'var(--color-assistant-header-border)',
+        }}
       >
         <div className="flex items-center gap-3 mb-2.5">
-          {/* 小云云角色头像 */}
-          <div className="w-10 h-10 rounded-full overflow-hidden shrink-0">
+          {/* 小云云角色头像（白色圆环） */}
+          <div className="w-10 h-10 rounded-full overflow-hidden shrink-0 ring-2 ring-white/30">
             <img src="/avatars/xiaoyunyun.png" alt="小云云" className="w-full h-full object-cover" />
           </div>
           <div className="flex-1 min-w-0">
-            <h3 className="text-base font-bold text-[var(--color-text)]">{t('assistant.title')}</h3>
-            <p className="text-xs text-[var(--color-text-secondary)] truncate">{t('assistant.subtitle')}</p>
+            <h3 className="text-base font-bold text-[var(--color-assistant-header-text)]">{t('assistant.title')}</h3>
+            <p className="text-xs text-[var(--color-assistant-header-text-secondary)] truncate">{t('assistant.subtitle')}</p>
           </div>
 
           {/* 历史会话视图切换 */}
@@ -289,8 +292,8 @@ export default function AIAssistantPanel({ isVisible, view, onViewChange, onClos
             onClick={() => onViewChange(view === 'chat' ? 'history' : 'chat')}
             className={`p-1.5 rounded-lg transition-colors duration-150 ${
               view === 'history'
-                ? 'text-[var(--color-accent)] bg-[var(--color-accent-bg)]'
-                : 'text-[var(--color-text-secondary)] hover:bg-[var(--color-surface-alt)] hover:text-[var(--color-accent)]'
+                ? 'text-white bg-white/20'
+                : 'text-white/70 hover:bg-white/10 hover:text-white'
             }`}
             title={t('assistant.viewHistory')}
           >
@@ -302,8 +305,8 @@ export default function AIAssistantPanel({ isVisible, view, onViewChange, onClos
               chat.handleNewChat();
               onViewChange('chat');
             }}
-            className="p-1.5 rounded-lg text-[var(--color-text-secondary)]
-              hover:bg-[var(--color-surface-alt)] hover:text-[var(--color-accent)]
+            className="p-1.5 rounded-lg text-white/70
+              hover:bg-white/10 hover:text-white
               transition-colors duration-150"
             title={t('assistant.newChat')}
           >
@@ -311,8 +314,8 @@ export default function AIAssistantPanel({ isVisible, view, onViewChange, onClos
           </button>
           <button
             onClick={onClose}
-            className="p-1.5 rounded-lg text-[var(--color-text-secondary)]
-              hover:bg-[var(--color-surface-alt)] hover:text-[var(--color-text)]
+            className="p-1.5 rounded-lg text-white/70
+              hover:bg-white/10 hover:text-white
               transition-colors duration-150"
             title={t('assistant.close')}
           >
@@ -330,9 +333,9 @@ export default function AIAssistantPanel({ isVisible, view, onViewChange, onClos
                   key={action.key}
                   onClick={() => chat.setInput(action.prompt)}
                   className="flex items-center gap-1 px-3 py-1.5 rounded-full text-xs font-medium
-                    bg-[var(--color-quick-action-bg)] text-[var(--color-quick-action-text)]
-                    border border-[var(--color-quick-action-border)]
-                    hover:opacity-90 transition-opacity duration-200"
+                    bg-white/90 text-[#2b7de9]
+                    border border-white/40 backdrop-blur-sm
+                    hover:bg-white transition-colors duration-200 shadow-sm"
                 >
                   <Icon size={14} />
                   {t(action.labelKey)}
@@ -439,7 +442,13 @@ export default function AIAssistantPanel({ isVisible, view, onViewChange, onClos
           </div>
 
           {/* ===== 对话视图：输入区 ===== */}
-          <div className="px-4 pb-3 border-t border-[var(--color-assistant-border)] shrink-0">
+          <div
+            className="px-4 pb-3 border-t shrink-0"
+            style={{
+              background: 'var(--color-assistant-input-bg)',
+              borderTopColor: 'var(--color-assistant-header-border)',
+            }}
+          >
             {/* 工具按钮行：附件 / 深度思考 / 引用笔记 / PPT 模板（图标 + 文字，Tooltip 同 title） */}
             <div className="flex items-center gap-1.5 pt-2.5 pb-1.5">
               {/* 附件上传按钮 */}
@@ -448,8 +457,8 @@ export default function AIAssistantPanel({ isVisible, view, onViewChange, onClos
                 disabled={chat.isStreaming}
                 className={`flex items-center gap-1 px-2.5 py-1.5 rounded-lg border text-xs font-medium transition-colors ${
                   chat.pendingAttachments.length > 0
-                    ? 'border-[var(--color-accent)] text-[var(--color-accent)] bg-[var(--color-accent-bg)]'
-                    : 'border-[var(--color-border)] text-[var(--color-text-secondary)] hover:bg-[var(--color-accent-bg)] hover:text-[var(--color-accent)]'
+                    ? 'border-white/50 text-white bg-white/20'
+                    : 'border-white/30 text-white/80 hover:bg-white/10 hover:text-white'
                 } disabled:opacity-50`}
                 title={t('chat.attachmentUpload')}
               >
@@ -471,8 +480,8 @@ export default function AIAssistantPanel({ isVisible, view, onViewChange, onClos
                 onClick={() => chat.setEnableThinking(!chat.enableThinking)}
                 className={`flex items-center gap-1 px-2.5 py-1.5 rounded-lg border text-xs font-medium transition-colors ${
                   chat.enableThinking
-                    ? 'border-[var(--color-accent)] text-[var(--color-accent)] bg-[var(--color-accent-bg)]'
-                    : 'border-[var(--color-border)] text-[var(--color-text-secondary)] hover:bg-[var(--color-accent-bg)] hover:text-[var(--color-accent)]'
+                    ? 'border-white/50 text-white bg-white/20'
+                    : 'border-white/30 text-white/80 hover:bg-white/10 hover:text-white'
                 }`}
                 title={t('chat.thinkingMode')}
               >
@@ -485,8 +494,8 @@ export default function AIAssistantPanel({ isVisible, view, onViewChange, onClos
                 onClick={() => chat.setShowNotePicker((v) => !v)}
                 className={`flex items-center gap-1 px-2.5 py-1.5 rounded-lg border text-xs font-medium transition-colors ${
                   chat.showNotePicker || chat.selectedNotes.length > 0
-                    ? 'border-[var(--color-accent)] text-[var(--color-accent)] bg-[var(--color-accent-bg)]'
-                    : 'border-[var(--color-border)] text-[var(--color-text-secondary)] hover:bg-[var(--color-accent-bg)] hover:text-[var(--color-accent)]'
+                    ? 'border-white/50 text-white bg-white/20'
+                    : 'border-white/30 text-white/80 hover:bg-white/10 hover:text-white'
                 }`}
                 title={t('chat.noteRef')}
               >
@@ -499,8 +508,8 @@ export default function AIAssistantPanel({ isVisible, view, onViewChange, onClos
                 onClick={() => chat.setShowTemplatePicker((v) => !v)}
                 className={`flex items-center gap-1 px-2.5 py-1.5 rounded-lg border text-xs font-medium transition-colors ${
                   chat.showTemplatePicker || chat.selectedTemplate
-                    ? 'border-[var(--color-accent)] text-[var(--color-accent)] bg-[var(--color-accent-bg)]'
-                    : 'border-[var(--color-border)] text-[var(--color-text-secondary)] hover:bg-[var(--color-accent-bg)] hover:text-[var(--color-accent)]'
+                    ? 'border-white/50 text-white bg-white/20'
+                    : 'border-white/30 text-white/80 hover:bg-white/10 hover:text-white'
                 }`}
                 title={t('chat.pptTemplate')}
               >
@@ -534,10 +543,10 @@ export default function AIAssistantPanel({ isVisible, view, onViewChange, onClos
                 onKeyDown={(e) => e.key === 'Enter' && chat.handleSend()}
                 placeholder={t('chat.placeholder')}
                 className="flex-1 h-10 px-3 rounded-lg text-sm
-                  bg-[var(--color-search-bg)] border border-[var(--color-search-border)]
+                  bg-white/95 border border-white/40
                   text-[var(--color-text)] placeholder-[var(--color-text-tertiary)]
-                  focus:outline-none focus:border-[var(--color-accent)]
-                  transition-colors duration-200"
+                  focus:outline-none focus:border-white/70 focus:bg-white
+                  transition-colors duration-200 backdrop-blur-sm"
                 disabled={chat.isStreaming}
               />
               {chat.isStreaming ? (

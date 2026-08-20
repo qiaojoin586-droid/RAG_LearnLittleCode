@@ -83,6 +83,13 @@
   --color-assistant-ai-bubble: linear-gradient(135deg, #f0f6ff 0%, #f8fbff 100%);
   --color-assistant-ai-bubble-border: #c8ddf8;
 
+  /* 浮层顶部/底部海蓝区域专用 */
+  --color-assistant-header-bg: linear-gradient(135deg, #4a9eff 0%, #789597 100%);
+  --color-assistant-header-text: #ffffff;
+  --color-assistant-header-text-secondary: rgba(255, 255, 255, 0.8);
+  --color-assistant-header-border: rgba(255, 255, 255, 0.2);
+  --color-assistant-input-bg: linear-gradient(135deg, #4a9eff 0%, #3a8ae8 100%);
+
   /* 笔记格式徽章 */
   --color-badge-md-bg: #e8f5e9;
   --color-badge-md-text: #2e7d32;
@@ -161,8 +168,15 @@
   --color-tree-selected: #1a2e4a;
 
   /* AI 助手浮层专用 — 暗色海蓝主题 */
-  --color-assistant-ai-bubble: linear-gradient(135deg, #1a2d45 0%, #1e3250 100%);
+  --color-assistant-ai-bubble: linear-gradient(135deg, #1a2d45 0%, #1e4950 100%);
   --color-assistant-ai-bubble-border: #2a4a6a;
+
+  /* 暗色浮层顶部/底部海蓝区域 */
+  --color-assistant-header-bg: linear-gradient(135deg, #1a3a5c 0%, #223e79 100%);
+  --color-assistant-header-text: #e0e8f5;
+  --color-assistant-header-text-secondary: rgba(224, 232, 245, 0.7);
+  --color-assistant-header-border: rgba(255, 255, 255, 0.1);
+  --color-assistant-input-bg: linear-gradient(135deg, #1a5a5c 0%, #152d4a 100%);
 }
 
 /* ========== 全局样式 ========== */

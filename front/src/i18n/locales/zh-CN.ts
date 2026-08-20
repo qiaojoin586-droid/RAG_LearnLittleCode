@@ -18,7 +18,7 @@ const zh = {
 
   // 顶部导航栏（v2 新增）
   'topbar.searchPlaceholder': '搜索笔记... ⌘K',
-  'topbar.assistant': 'Hi, 我是 小云云',
+  'topbar.assistant': 'Hi, 我是 小云云 ~',
   'topbar.userMenu': '用户菜单',
 
   // 全局搜索（v2 阶段四新增）
@@ -31,7 +31,7 @@ const zh = {
   'gsearch.empty': '无匹配结果',
 
   // AI 对话浮层（v2 新增）
-  'assistant.title': 'Hi, 我是 小云云',
+  'assistant.title': 'Hi, 我是 小云云 ~',
   'assistant.subtitle': '基于你的笔记知识库，我可以帮你：',
   'assistant.viewChat': '对话',
   'assistant.viewHistory': '历史会话',
