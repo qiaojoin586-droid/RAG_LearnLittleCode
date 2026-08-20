@@ -18,7 +18,7 @@ const zh = {
 
   // 顶部导航栏（v2 新增）
   'topbar.searchPlaceholder': '搜索笔记... ⌘K',
-  'topbar.assistant': 'Hi, 我是 Cici',
+  'topbar.assistant': 'Hi, 我是 小云云',
   'topbar.userMenu': '用户菜单',
 
   // 全局搜索（v2 阶段四新增）
@@ -31,7 +31,7 @@ const zh = {
   'gsearch.empty': '无匹配结果',
 
   // AI 对话浮层（v2 新增）
-  'assistant.title': 'Hi, 我是 Cici',
+  'assistant.title': 'Hi, 我是 小云云',
   'assistant.subtitle': '基于你的笔记知识库，我可以帮你：',
   'assistant.viewChat': '对话',
   'assistant.viewHistory': '历史会话',
@@ -52,6 +52,7 @@ const zh = {
   'assistant.refresh': '刷新',
   'assistant.messageCount': '条消息',
   'assistant.historyEmpty': '暂无对话记录',
+  'assistant.autoTag': '自动',
   'assistant.rename': '重命名',
   'assistant.delete': '删除',
   'assistant.deleteConfirm': '确认删除',
@@ -128,6 +129,9 @@ const zh = {
   'note.selectedCount': '已选 {{count}} 条',
   'note.collapse': '收起',
   'note.expand': '展开',
+  'note.previewCreated': '创建于',
+  'note.previewUpdated': '更新于',
+  'note.previewNoContent': '暂无内容',
 
   // 聊天
   'chat.newChat': '新对话',

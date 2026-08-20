@@ -10,11 +10,14 @@
  * 审查 ⑤：从 AIChat.tsx（1088 行巨型组件）拆出。
  */
 
+import { useMemo } from 'react';
 import { Loader2, User } from 'lucide-react';
 import type { ChatMessage } from '../../types/api';
 import type { PlanStepData } from './PlanProgressCard';
 import PlanProgressCard from './PlanProgressCard';
 import MessageContent from './MessageContent';
+import ReferencedNoteCards from './ReferencedNoteCards';
+import { parseReferencedNotes } from '../../utils/noteReferenceParser';
 import PptDownloadCard from './PptDownloadCard';
 import TtsAudioCard from './TtsAudioCard';
 import AttachmentViewer from './AttachmentViewer';
@@ -61,6 +64,30 @@ interface Props {
   plan: PlanDisplayState;
   /** 深度思考模式的实时思考内容（thinking 事件，审查 B+C） */
   thinkingText?: string;
+}
+
+/**
+ * 用户消息内容渲染（v2 引用笔记卡片化）
+ *
+ * 用户消息原为纯文本直出（whitespace-pre-wrap）；现解析引用块：
+ * - 原始问题保持纯文本样式（蓝底白字）
+ * - 引用笔记替换为卡片列表（与 AI 搜索结果卡片同族，点击预览全文）
+ * - 解析失败（普通消息）→ 原样纯文本
+ */
+function UserMessageContent({ content }: { content: string }) {
+  const parts = useMemo(() => parseReferencedNotes(content), [content]);
+
+  if (!parts) {
+    return <div className="text-sm whitespace-pre-wrap">{content}</div>;
+  }
+
+  return (
+    <div className="text-sm">
+      {parts.prefix.trim() && <div className="whitespace-pre-wrap">{parts.prefix}</div>}
+      <ReferencedNoteCards notes={parts.notes} />
+      {parts.suffix.trim() && <div className="whitespace-pre-wrap">{parts.suffix}</div>}
+    </div>
+  );
 }
 
 export default function MessageBubble({ msg, isLast, isStreaming, userAvatar, plan, thinkingText }: Props) {
@@ -124,7 +151,9 @@ export default function MessageBubble({ msg, isLast, isStreaming, userAvatar, pl
             <MessageContent content={msg.content || '...'} />
           )
         ) : (
-          <div className="text-sm whitespace-pre-wrap">{msg.content || '...'}</div>
+          /* 用户消息：引用笔记卡片化（v2）——解析引用块，问题保留纯文本样式，
+             引用笔记以卡片展示（卡片为白底，在蓝色气泡上仍可读） */
+          <UserMessageContent content={msg.content || '...'} />
         )}
         {/* 工具调用状态指示（简单路径补转发工具事件后生效，§6.3/§7；中文名映射） */}
         {!isUser && isLast && plan.currentTool && (

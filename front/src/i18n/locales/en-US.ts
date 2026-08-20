@@ -18,7 +18,7 @@ const en = {
 
   // Top bar (v2)
   'topbar.searchPlaceholder': 'Search notes... ⌘K',
-  'topbar.assistant': "Hi, I'm Cici",
+  'topbar.assistant': "Hi, I'm YUNYUN",
   'topbar.userMenu': 'User menu',
 
   // Global search (v2 phase 4)
@@ -31,7 +31,7 @@ const en = {
   'gsearch.empty': 'No results',
 
   // AI assistant panel (v2)
-  'assistant.title': "Hi, I'm Cici",
+  'assistant.title': "Hi, I'm YUNYUN",
   'assistant.subtitle': 'Based on your notes knowledge base, I can help you:',
   'assistant.viewChat': 'Chat',
   'assistant.viewHistory': 'History',
@@ -52,6 +52,7 @@ const en = {
   'assistant.refresh': 'Refresh',
   'assistant.messageCount': 'messages',
   'assistant.historyEmpty': 'No chat history yet',
+  'assistant.autoTag': 'Auto',
   'assistant.rename': 'Rename',
   'assistant.delete': 'Delete',
   'assistant.deleteConfirm': 'Delete',
@@ -128,6 +129,9 @@ const en = {
   'note.selectedCount': '{{count}} selected',
   'note.collapse': 'Collapse',
   'note.expand': 'Expand',
+  'note.previewCreated': 'Created',
+  'note.previewUpdated': 'Updated',
+  'note.previewNoContent': 'No content',
 
   // Chat
   'chat.newChat': 'New Chat',

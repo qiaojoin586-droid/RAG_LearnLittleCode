@@ -16,6 +16,7 @@ import { useTranslation } from 'react-i18next';
 import { toast } from 'sonner';
 import { Plus, CheckSquare, LayoutGrid, Trash2, X, FileText, PanelLeft, ChevronLeft, ChevronRight, Folder } from 'lucide-react';
 import { notesApi } from '../api/notes';
+import { useNoteContextStore } from '../stores/useNoteContextStore';
 import EmptyState from '../components/common/EmptyState';
 import LoadingSkeleton from '../components/common/LoadingSkeleton';
 import ConfirmDialog from '../components/common/ConfirmDialog';
@@ -104,21 +105,27 @@ export default function NoteList() {
   const [selectedNote, setSelectedNote] = useState<Note | null>(null);
 
   // 路由（/notes/:id、/notes/new）→ 同步选中态：列表已有数据直接用；深链接则拉详情
+  // 同时写入「当前浏览笔记」上下文（AI 浮层自动关联用，实时跟随切换）
   useEffect(() => {
     if (isNewMode || !id) {
       setSelectedNote(null);
+      useNoteContextStore.getState().setCurrentNote(null);
       return;
     }
     const existing = notes.find((n) => n.id === id);
     if (existing) {
       setSelectedNote(existing);
+      useNoteContextStore.getState().setCurrentNote(existing);
       return;
     }
     let cancelled = false;
     notesApi
       .detail(id)
       .then((res) => {
-        if (!cancelled) setSelectedNote(res.data.data);
+        if (!cancelled) {
+          setSelectedNote(res.data.data);
+          useNoteContextStore.getState().setCurrentNote(res.data.data);
+        }
       })
       .catch(() => {
         if (!cancelled) {
@@ -133,10 +140,19 @@ export default function NoteList() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [id, isNewMode]);
 
-  /** 编辑器保存回调：更新成功后同步列表卡片与选中态 */
+  // 离开笔记页（卸载）时清除上下文，避免其他页面浮层仍关联旧笔记
+  useEffect(
+    () => () => {
+      useNoteContextStore.getState().setCurrentNote(null);
+    },
+    []
+  );
+
+  /** 编辑器保存回调：更新成功后同步列表卡片、选中态与笔记上下文（浮层自动关联取最新内容） */
   const handleNoteUpdated = useCallback((updated: Note) => {
     setNotes((prev) => prev.map((n) => (n.id === updated.id ? { ...n, ...updated } : n)));
     setSelectedNote(updated);
+    useNoteContextStore.getState().setCurrentNote(updated);
   }, []);
 
   /** 编辑器保存回调：新建成功后插入列表顶部并切换 URL 到新笔记 */

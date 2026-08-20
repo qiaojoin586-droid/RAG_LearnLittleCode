@@ -17,6 +17,7 @@ import { useTranslation } from 'react-i18next';
 import { toast } from 'sonner';
 import { useSSE } from './useSSE';
 import { useSessionStore } from '../stores/useSessionStore';
+import { useNoteContextStore } from '../stores/useNoteContextStore';
 import { sessionsApi } from '../api/sessions';
 import { endpoints } from '../api/endpoints';
 import { uploadChatFile, deleteChatFile } from '../api/chat';
@@ -50,6 +51,25 @@ export function useChatComposer() {
   // 引用笔记状态
   const [selectedNotes, setSelectedNotes] = useState<Note[]>([]);
   const [showNotePicker, setShowNotePicker] = useState(false);
+
+  // 自动关联（v2）：当前详情区打开的笔记（useNoteContextStore，由 NoteList 写入）
+  const currentNote = useNoteContextStore((s) => s.currentNote);
+  // 手动解除的自动关联笔记 ID（切换笔记后自动恢复关联）
+  const [dismissedAutoNoteId, setDismissedAutoNoteId] = useState<string | null>(null);
+
+  // 自动关联笔记：仅在未手动选择任何笔记、且未被手动解除时生效（需求边界：手动选择优先）
+  const autoNote =
+    currentNote && selectedNotes.length === 0 && currentNote.id !== dismissedAutoNoteId
+      ? currentNote
+      : null;
+
+  // 实际参与发送的引用笔记 = 手动选择（优先）∪ 自动关联（兜底）
+  const effectiveNotes = selectedNotes.length > 0 ? selectedNotes : autoNote ? [autoNote] : [];
+
+  /** 手动解除当前自动关联（切换笔记后自动恢复） */
+  const dismissAutoNote = () => {
+    if (currentNote) setDismissedAutoNoteId(currentNote.id);
+  };
 
   // PPT 模板选择状态（单选）
   const [selectedTemplate, setSelectedTemplate] = useState<PptTemplateInfo | null>(null);
@@ -233,17 +253,19 @@ export function useChatComposer() {
     // 会话 ID：当前会话（null = 新会话，后端自动创建）
     const sessionId = currentSessionId;
 
-    // 构建发送内容：若有引用笔记，将笔记内容作为上下文附加（含 ID 供 Agent 直接更新）
+    // 构建发送内容：若有引用笔记（手动选择优先，自动关联兜底），
+    // 以「卡片」结构化形式发送给 LLM（每篇一张卡片：编号 + 标题 + 正文分块）；
+    // <referenced_notes> 元数据块保持原格式（后端解析依赖，勿动）
     let messageText = input;
-    if (selectedNotes.length > 0) {
-      const noteContext = selectedNotes
-        .map((n) => `【笔记：${n.title}】\n${n.content}`)
+    if (effectiveNotes.length > 0) {
+      const noteCards = effectiveNotes
+        .map((n, i) => `【卡片 ${i + 1}｜${n.title}】\n${n.content}`)
         .join('\n\n');
       // 结构化引用块：包含笔记 ID，供后端解析并注入 Agent 上下文
-      const noteRefBlock = selectedNotes
+      const noteRefBlock = effectiveNotes
         .map((n) => `- ID: ${n.id} | 标题: ${n.title}`)
         .join('\n');
-      messageText = `${input}\n\n---\n以下是用户引用的笔记内容，请结合这些内容回答：\n${noteContext}\n\n<referenced_notes>\n${noteRefBlock}\n</referenced_notes>`;
+      messageText = `${input}\n\n---\n以下是用户引用的笔记卡片：\n\n${noteCards}\n\n<referenced_notes>\n${noteRefBlock}\n</referenced_notes>`;
     }
     // 附加用户选择的 PPT 模板（后端解析注入 system_prompt，LLM 填入工具参数）
     if (selectedTemplate) {
@@ -265,7 +287,9 @@ export function useChatComposer() {
       id: Date.now(),
       session_id: sessionId || '',
       role: 'user',
-      content: input, // 气泡中只显示用户原始输入
+      // 显示完整组合文本（含引用块），与后端入库内容一致；
+      // MessageContent 展示层将其解析为「问题 + 引用笔记卡片」（v2 卡片化）
+      content: messageText,
       created_at: new Date().toISOString(),
       attachments: userAttachments.length > 0 ? userAttachments : undefined,
     };
@@ -574,6 +598,10 @@ export function useChatComposer() {
     selectedNoteIds,
     showNotePicker,
     setShowNotePicker,
+    // 自动关联（v2）：当前详情区笔记作为默认上下文
+    autoNote,
+    effectiveNotes,
+    dismissAutoNote,
     selectedTemplate,
     toggleTemplate,
     showTemplatePicker,

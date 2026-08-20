@@ -560,22 +560,32 @@ export default function AIAssistantPanel({ isVisible, view, onViewChange, onClos
             {/* 附件预览条（发送后清空） */}
             <AttachmentBar items={chat.pendingAttachments} onRemove={chat.removeAttachment} />
 
-            {/* 引用笔记标签 */}
-            {chat.selectedNotes.length > 0 && (
+            {/* 引用笔记标签：手动选择优先；无手动选择时展示自动关联的当前笔记（v2） */}
+            {chat.effectiveNotes.length > 0 && (
               <div className="flex flex-wrap gap-1.5 mt-2">
-                {chat.selectedNotes.map((note) => (
-                  <span
-                    key={note.id}
-                    className="inline-flex items-center gap-1 px-2 py-1 text-xs rounded-[var(--radius-md)]
-                      bg-[var(--color-accent-bg)] text-[var(--color-accent)] border border-[var(--color-accent)]/20"
-                  >
-                    <FileText size={12} />
-                    <span className="max-w-[120px] truncate">{note.title}</span>
-                    <button onClick={() => chat.removeNote(note.id)} className="hover:opacity-70">
-                      <X size={12} />
-                    </button>
-                  </span>
-                ))}
+                {chat.effectiveNotes.map((note) => {
+                  const isAuto = chat.autoNote?.id === note.id;
+                  return (
+                    <span
+                      key={note.id}
+                      className="inline-flex items-center gap-1 px-2 py-1 text-xs rounded-[var(--radius-md)]
+                        bg-[var(--color-accent-bg)] text-[var(--color-accent)] border border-[var(--color-accent)]/20"
+                    >
+                      <FileText size={12} />
+                      <span className="max-w-[120px] truncate">{note.title}</span>
+                      {/* 自动关联标记：清晰展示当前对话基于哪篇笔记执行 */}
+                      {isAuto && (
+                        <span className="text-[10px] opacity-70 shrink-0">{t('assistant.autoTag')}</span>
+                      )}
+                      <button
+                        onClick={() => (isAuto ? chat.dismissAutoNote() : chat.removeNote(note.id))}
+                        className="hover:opacity-70"
+                      >
+                        <X size={12} />
+                      </button>
+                    </span>
+                  );
+                })}
               </div>
             )}
 
