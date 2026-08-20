@@ -165,6 +165,8 @@ const zh = {
   'review.complete': '完成回顾',
   'review.noReviews': '今日无需回顾',
   'review.stats': '回顾统计',
+  'review.previewTitle': '笔记内容预览',
+  'review.clickHint': '点击左侧笔记查看完整内容',
 
   // 设置
   'settings.theme': '主题',

@@ -28,6 +28,7 @@ import rehypeHighlight from 'rehype-highlight';
 import rehypeKatex from 'rehype-katex';
 import { notesApi } from '../../api/notes';
 import { noteExcerpt } from '../../utils/noteFormat';
+import { escapeInlineHtml } from '../../utils/markdownCompat';
 import type { Note } from '../../types/api';
 import type { ParsedSearchResult } from '../../utils/noteSearchParser';
 
@@ -217,7 +218,8 @@ export default function SearchResultCards({ results }: { results: ParsedSearchRe
                       remarkPlugins={[remarkGfm, remarkMath]}
                       rehypePlugins={[rehypeHighlight, rehypeKatex]}
                     >
-                      {previewNote.content}
+                      {/* 转义行内角括号：避免泛型 <T> 被当作原始 HTML 丢弃 */}
+                      {escapeInlineHtml(previewNote.content)}
                     </ReactMarkdown>
                   </div>
                 ) : (

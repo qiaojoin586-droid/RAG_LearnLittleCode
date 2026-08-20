@@ -19,6 +19,7 @@ import { reviewApi } from '../../api/review';
 import { knowledgeApi } from '../../api/knowledge';
 import { pptTemplatesApi, type PptTemplateInfo } from '../../api/pptTemplates';
 import { notesApi } from '../../api/notes';
+import { useReviewBridgeStore } from '../../stores/useReviewBridgeStore';
 import type { PanelType } from './IconRail';
 import type { ReviewRecord, KnowledgeDocument, DeletedNote } from '../../types/api';
 
@@ -83,7 +84,11 @@ export default function SidePanel({ activePanel, onClose }: SidePanelProps) {
               title: r.note_title,
               meta: `${t('panel.nextReview')} ${new Date(r.next_review_at).toLocaleDateString()} · ${r.review_count} ${t('panel.times')}`,
               icon: BookOpen,
-              onClick: () => navigate('/review'),
+              // v2：点击条目 → 通过桥接 store 同步页面答题卡片与预览区（页面内不再重复列表）
+              onClick: () => {
+                useReviewBridgeStore.getState().selectReview(r.review_id);
+                navigate('/review');
+              },
             }))
           );
         } else if (panel === 'knowledge') {
@@ -132,14 +137,16 @@ export default function SidePanel({ activePanel, onClose }: SidePanelProps) {
     [navigate, t]
   );
 
-  // 面板类型变化时拉取对应列表
+  // 面板类型变化时拉取对应列表；
+  // listVersion 变化（页面完成回顾后 bumpList）时重新拉取，保持侧边栏列表最新
+  const listVersion = useReviewBridgeStore((s) => s.listVersion);
   useEffect(() => {
     if (activePanel && activePanel !== 'notes') {
       fetchPanelData(activePanel);
     } else {
       setListItems([]);
     }
-  }, [activePanel, fetchPanelData]);
+  }, [activePanel, fetchPanelData, listVersion]);
 
   return (
     <div className="flex flex-col h-full w-full">

@@ -165,6 +165,8 @@ const en = {
   'review.complete': 'Complete',
   'review.noReviews': 'No reviews for today',
   'review.stats': 'Review Stats',
+  'review.previewTitle': 'Note Preview',
+  'review.clickHint': 'Click a note on the left to view its full content',
 
   // Settings
   'settings.theme': 'Theme',

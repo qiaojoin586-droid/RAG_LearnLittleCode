@@ -22,6 +22,7 @@ import remarkMath from 'remark-math';
 import rehypeHighlight from 'rehype-highlight';
 import rehypeKatex from 'rehype-katex';
 import { noteExcerpt } from '../../utils/noteFormat';
+import { escapeInlineHtml } from '../../utils/markdownCompat';
 import type { ReferencedNote } from '../../utils/noteReferenceParser';
 
 export default function ReferencedNoteCards({ notes }: { notes: ReferencedNote[] }) {
@@ -90,7 +91,8 @@ export default function ReferencedNoteCards({ notes }: { notes: ReferencedNote[]
                       remarkPlugins={[remarkGfm, remarkMath]}
                       rehypePlugins={[rehypeHighlight, rehypeKatex]}
                     >
-                      {preview.content}
+                      {/* 转义行内角括号：避免泛型 <T> 被当作原始 HTML 丢弃 */}
+                      {escapeInlineHtml(preview.content)}
                     </ReactMarkdown>
                   </div>
                 ) : (

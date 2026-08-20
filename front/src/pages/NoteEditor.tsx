@@ -21,6 +21,7 @@ import { normalizeCategory } from '../constants/noteCategories';
 import 'highlight.js/styles/github.css';
 import { notesApi } from '../api/notes';
 import TagInput from '../components/common/TagInput';
+import { isHtml, htmlToMarkdown, normalizeNoteContent, escapeInlineHtml } from '../utils/markdownCompat';
 import type { Note } from '../types/api';
 
 type EditorMode = 'edit' | 'split' | 'preview';
@@ -36,41 +37,6 @@ interface NoteEditorProps {
   onBackMobile?: () => void;
 }
 
-/** 检测内容是否为 HTML 格式 */
-const isHtml = (str: string) => /<[a-z][\s\S]*>/i.test(str);
-
-/** HTML 转 Markdown（简易转换，用于兼容旧数据） */
-const htmlToMarkdown = (html: string): string => {
-  let md = html;
-  md = md.replace(/<h1[^>]*>(.*?)<\/h1>/gi, '# $1\n');
-  md = md.replace(/<h2[^>]*>(.*?)<\/h2>/gi, '## $1\n');
-  md = md.replace(/<h3[^>]*>(.*?)<\/h3>/gi, '### $1\n');
-  md = md.replace(/<(strong|b)[^>]*>(.*?)<\/\1>/gi, '**$2**');
-  md = md.replace(/<(em|i)[^>]*>(.*?)<\/\1>/gi, '*$2*');
-  md = md.replace(/<s[^>]*>(.*?)<\/s>/gi, '~~$1~~');
-  md = md.replace(/<code[^>]*>(.*?)<\/code>/gi, '`$1`');
-  md = md.replace(/<pre[^>]*><code[^>]*>([\s\S]*?)<\/code><\/pre>/gi, '```\n$1\n```\n');
-  md = md.replace(/<blockquote[^>]*>([\s\S]*?)<\/blockquote>/gi, (_, inner) => {
-    return inner.replace(/<[^>]*>/g, '').split('\n').map((l: string) => `> ${l}`).join('\n') + '\n';
-  });
-  md = md.replace(/<ul[^>]*>([\s\S]*?)<\/ul>/gi, (_, inner) => {
-    return inner.replace(/<li[^>]*>([\s\S]*?)<\/li>/gi, '- $1\n').trim() + '\n';
-  });
-  md = md.replace(/<ol[^>]*>([\s\S]*?)<\/ol>/gi, (_, inner) => {
-    let idx = 0;
-    return inner.replace(/<li[^>]*>([\s\S]*?)<\/li>/gi, (_match: string, p1: string) => `${++idx}. ${p1}\n`).trim() + '\n';
-  });
-  md = md.replace(/<a[^>]*href="([^"]*)"[^>]*>(.*?)<\/a>/gi, '[$2]($1)');
-  md = md.replace(/<img[^>]*src="([^"]*)"[^>]*alt="([^"]*)"[^>]*\/?>/gi, '![$2]($1)');
-  md = md.replace(/<hr[^>]*\/?>/gi, '\n---\n');
-  md = md.replace(/<p[^>]*>([\s\S]*?)<\/p>/gi, '$1\n\n');
-  md = md.replace(/<br[^>]*\/?>/gi, '\n');
-  md = md.replace(/<[^>]+>/g, '');
-  md = md.replace(/&nbsp;/g, ' ').replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&amp;/g, '&');
-  md = md.replace(/\n{3,}/g, '\n\n');
-  return md.trim();
-};
-
 export default function NoteEditor({ note, onCreated, onUpdated, onBackMobile }: NoteEditorProps) {
   const { t } = useTranslation();
 
@@ -78,8 +44,9 @@ export default function NoteEditor({ note, onCreated, onUpdated, onBackMobile }:
   const [title, setTitle] = useState(note?.title ?? '');
   const [content, setContent] = useState(() => {
     const raw = note?.content ?? '';
-    // 兼容旧数据：如果内容是 HTML，自动转换为 Markdown
-    return isHtml(raw) ? htmlToMarkdown(raw) : raw;
+    // 兼容旧数据：如果内容是 HTML，自动转换为 Markdown；
+    // 再归一化（剥外层围栏/CRLF），避免整篇被渲染为代码块
+    return normalizeNoteContent(isHtml(raw) ? htmlToMarkdown(raw) : raw);
   });
   const [tags, setTags] = useState<string[]>(note?.tags ?? []);
   // 分类归一化：非标准分类（如历史脏数据）统一归为"其他"
@@ -352,7 +319,8 @@ export default function NoteEditor({ note, onCreated, onUpdated, onBackMobile }:
                       remarkPlugins={[remarkGfm]}
                       rehypePlugins={[rehypeHighlight]}
                     >
-                      {content}
+                      {/* 转义行内角括号：避免泛型 <T> 被当作原始 HTML 丢弃 */}
+                      {escapeInlineHtml(content)}
                     </ReactMarkdown>
                   </div>
                 ) : (
