@@ -23,14 +23,14 @@ from app.core.logger_handler import logger
 from app.core.failed_response import BusinessError, ErrorCode
 from app.core.task_runner import spawn_background_task
 from app.models.note import Note
+from app.models.category import NoteCategory
 from app.models.review import ReviewRecord
 from app.schemas.note import NoteCreate, NoteUpdate
 
 
-# 笔记标准分类（与前端 front/src/constants/noteCategories.ts 保持一致）
-STANDARD_NOTE_CATEGORIES = ("工作", "学习", "生活", "技术")
-# 兜底分类：分类非空且不属于标准分类时归入"其他"
-OTHER_CATEGORY = "其他"
+# "未分类"过滤哨兵值（与前端保持一致）：
+# GET /note?category_id=__uncategorized__ → WHERE category_id IS NULL
+UNCATEGORIZED_SENTINEL = "__uncategorized__"
 
 
 class NoteService:
@@ -82,6 +82,12 @@ class NoteService:
             category=note_data.category,
             is_pinned=note_data.is_pinned,
         )
+
+        # 双写：category_id 优先，同时将 category 字符串同步为分类名
+        if note_data.category_id:
+            cat = await self._resolve_category_by_id(db, user_id, note_data.category_id)
+            note.category_id = cat.id
+            note.category = cat.name
         
         db.add(note)
         await db.flush()
@@ -170,18 +176,20 @@ class NoteService:
     async def list_notes(
         self, db: AsyncSession, user_id: str,
         page: int = 1, page_size: int = 20,
-        category: Optional[str] = None
+        category: Optional[str] = None,
+        category_id: Optional[str] = None,
     ) -> Tuple[List[Note], int]:
         """
         分页获取笔记列表
-        
+
         Args:
             db: 数据库会话
             user_id: 用户 ID
             page: 页码
             page_size: 每页数量
-            category: 按分类过滤（可选）
-            
+            category: 按分类字符串过滤（可选，双写期间向后兼容）
+            category_id: 按分类 ID 过滤（可选，优先；哨兵值 __uncategorized__ = 未分类）
+
         Returns:
             (笔记列表, 总数)
         """
@@ -192,17 +200,19 @@ class NoteService:
         count_query = select(func.count()).select_from(Note).where(
             and_(Note.user_id == user_id, Note.deleted_at.is_(None))
         )
-        
-        if category:
-            if category == OTHER_CATEGORY:
-                # "其他"兜底分类：分类非空且不属于标准分类（含历史任意分类值）。
-                # not_in 对 NULL 不匹配 → 排除"未分类"；列表中加入空串 → 排除空分类旧数据
-                excluded = STANDARD_NOTE_CATEGORIES + ("",)
-                query = query.where(Note.category.not_in(excluded))
-                count_query = count_query.where(Note.category.not_in(excluded))
+
+        if category_id:
+            if category_id == UNCATEGORIZED_SENTINEL:
+                # "未分类"哨兵值 → category_id IS NULL
+                query = query.where(Note.category_id.is_(None))
+                count_query = count_query.where(Note.category_id.is_(None))
             else:
-                query = query.where(Note.category == category)
-                count_query = count_query.where(Note.category == category)
+                query = query.where(Note.category_id == category_id)
+                count_query = count_query.where(Note.category_id == category_id)
+        elif category:
+            # 降级到字符串过滤（向后兼容；原"其他" not_in 兜底逻辑已随迁移移除）
+            query = query.where(Note.category == category)
+            count_query = count_query.where(Note.category == category)
         
         # 排序：置顶优先，然后按更新时间倒序
         query = query.order_by(Note.is_pinned.desc(), Note.updated_at.desc())
@@ -236,9 +246,19 @@ class NoteService:
             更新后的笔记对象
         """
         note = await self.get_note(db, note_id, user_id)
-        
+
         # 更新字段
         update_data = note_data.model_dump(exclude_unset=True)
+        if "category_id" in update_data:
+            # 双写：category_id 优先；显式传 None 表示移为未分类，同步清空字符串
+            if update_data["category_id"]:
+                cat = await self._resolve_category_by_id(db, user_id, update_data["category_id"])
+                update_data["category_id"] = cat.id
+                update_data["category"] = cat.name
+            elif "category" not in update_data:
+                # 显式 None 且未同时提供字符串 → 清空两字段；
+                # 若同时提供了字符串（AI 工具未匹配分类的降级场景），保留字符串
+                update_data["category"] = None
         for field, value in update_data.items():
             setattr(note, field, value)
         
@@ -530,6 +550,53 @@ class NoteService:
         await db.flush()
         await db.refresh(note)  # 回读 updated_at（func.now() 为 SQL 表达式，见 update_note 注释）
         logger.info(f"笔记移动分类: note_id={note_id}, category={category}")
+        return note
+
+    async def _resolve_category_by_id(
+        self, db: AsyncSession, user_id: str, category_id: str
+    ) -> NoteCategory:
+        """按 ID 解析分类（归属校验 + 排除软删除，未找到抛 404）"""
+        result = await db.execute(
+            select(NoteCategory).where(
+                NoteCategory.id == category_id,
+                NoteCategory.user_id == user_id,
+                NoteCategory.deleted_at.is_(None),
+            )
+        )
+        cat = result.scalar_one_or_none()
+        if not cat:
+            raise BusinessError(code=ErrorCode.CATEGORY_NOT_FOUND, http_status=404)
+        return cat
+
+    async def move_note_by_id(
+        self, db: AsyncSession, note_id: str, user_id: str, category_id: Optional[str]
+    ) -> Note:
+        """
+        按分类 ID 移动笔记（双写：category 字符串同步更新）
+
+        Args:
+            db: 数据库会话
+            note_id: 笔记 ID
+            user_id: 用户 ID
+            category_id: 目标分类 ID；None 表示移为"未分类"（双字段同步清空）
+
+        Returns:
+            更新后的笔记对象
+        """
+        note = await self.get_note(db, note_id, user_id)
+
+        if category_id:
+            cat = await self._resolve_category_by_id(db, user_id, category_id)
+            note.category_id = cat.id
+            note.category = cat.name
+        else:
+            note.category_id = None
+            note.category = None
+
+        note.updated_at = func.now()
+        await db.flush()
+        await db.refresh(note)  # 回读 updated_at（func.now() 为 SQL 表达式，见 update_note 注释）
+        logger.info(f"笔记移动分类: note_id={note_id}, category_id={category_id}")
         return note
 
     async def semantic_search(

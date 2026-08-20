@@ -101,6 +101,8 @@ export interface Note {
   content: string;
   tags: string[] | null;
   category: string | null;
+  /** 分类 ID（双写期间与 category 并行返回） */
+  category_id: string | null;
   is_pinned: boolean;
   created_at: string;
   updated_at: string;
@@ -127,6 +129,8 @@ export interface NoteCreate {
   content: string;
   tags?: string[];
   category?: string;
+  /** 分类 ID（优先；后端自动同步 category 字符串） */
+  category_id?: string;
   is_pinned?: boolean;
 }
 
@@ -136,6 +140,8 @@ export interface NoteUpdate {
   content?: string;
   tags?: string[];
   category?: string;
+  /** 分类 ID（显式传 null 表示移为未分类） */
+  category_id?: string | null;
   is_pinned?: boolean;
 }
 
@@ -164,6 +170,8 @@ export interface BatchOperation {
   note_ids: string[];
   operation: 'delete' | 'pin' | 'unpin' | 'move' | 'permanent_delete' | 'restore';
   target_category?: string;
+  /** 目标分类 ID（move 操作时优先使用） */
+  target_category_id?: string;
 }
 
 // ========== 聊天 ==========

@@ -2,7 +2,7 @@
  * 笔记列表页（v2 三栏式笔记管理界面，融合 test.md）
  *
  * 三栏布局（置于 main 内容区，各栏独立滚动，栏间 1px 细边框）：
- * - 第一栏 CategoryTree（220px）：静态分类树 + 后端 category 过滤 + 数量徽标
+ * - 第一栏 CategoryTree（220px）：动态分类树（后端 /category/tree）+ category_id 过滤 + 数量徽标
  * - 第二栏 笔记列表（320px）：竖排卡片 NoteCardItem，保留分页/批量/删除，新增收藏星/排序/视图切换
  * - 第三栏 NotePreviewPanel（自适应）：预览区（本期空状态，决策 D4）
  *
@@ -23,8 +23,10 @@ import ConfirmDialog from '../components/common/ConfirmDialog';
 import CategoryTree from '../components/layout/CategoryTree';
 import NoteCardItem from '../components/layout/NoteCardItem';
 import NotePreviewPanel from '../components/layout/NotePreviewPanel';
+import NoteMoveDialog from '../components/note/NoteMoveDialog';
 import NoteEditor from './NoteEditor';
-import { CATEGORY_TREE, type CategoryTreeNode } from '../constants/noteCategoryTree';
+import { useCategoryStore, UNCATEGORIZED_SENTINEL } from '../stores/useCategoryStore';
+import { findCategory } from '../types/category';
 import type { Note } from '../types/api';
 
 type SortOrder = 'updated' | 'created' | 'title';
@@ -74,8 +76,16 @@ export default function NoteList() {
   const [total, setTotal] = useState(0);
   const [page, setPage] = useState(1);
 
-  // 分类树选中节点（默认"所有笔记"）
-  const [selectedNode, setSelectedNode] = useState<CategoryTreeNode>(CATEGORY_TREE[0]);
+  // 分类树选中态（Zustand：null = 所有笔记；__uncategorized__ = 未分类；其余为分类 ID）
+  const selectedCategoryId = useCategoryStore((s) => s.selectedCategoryId);
+  const categories = useCategoryStore((s) => s.categories);
+
+  /** 当前选中分类的显示名（列表栏标题用） */
+  const selectedLabel = useMemo(() => {
+    if (selectedCategoryId === null) return t('note.allNotes');
+    if (selectedCategoryId === UNCATEGORIZED_SENTINEL) return t('note.uncategorized');
+    return findCategory(categories, selectedCategoryId)?.name ?? t('note.allNotes');
+  }, [selectedCategoryId, categories, t]);
 
   // 排序 / 视图切换（决策 M1）/ 批量 / 删除
   const [sortOrder, setSortOrder] = useState<SortOrder>('updated');
@@ -83,6 +93,8 @@ export default function NoteList() {
   const [batchMode, setBatchMode] = useState(false);
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
   const [deleteTarget, setDeleteTarget] = useState<string | 'batch' | null>(null);
+  // 批量移动笔记到分类（分类管理功能新增）
+  const [moveDialogOpen, setMoveDialogOpen] = useState(false);
 
   // 移动端：分类树抽屉显隐（<md 时树以 fixed 抽屉展示，见响应式策略 §8.2）
   const [treeDrawerOpen, setTreeDrawerOpen] = useState(false);
@@ -166,41 +178,43 @@ export default function NoteList() {
     [navigate]
   );
 
-  /** 加载笔记列表（reset=true 从第 1 页开始；静态占位节点直接空列表） */
+  /** 加载笔记列表（reset=true 从第 1 页开始；按分类 ID 过滤，null = 不过滤） */
   const loadNotes = useCallback(
-    async (reset = false, node?: CategoryTreeNode) => {
-      const target = node ?? selectedNode;
+    async (reset = false, categoryId?: string | null) => {
+      const target = categoryId === undefined ? selectedCategoryId : categoryId;
       setLoading(true);
       try {
-        // 静态占位节点（无 category 映射）：空列表空态（决策 D3）
-        if (target.key !== 'all' && target.category === undefined) {
-          setNotes([]);
-          setTotal(0);
-          setPage(1);
-        } else {
-          const p = reset ? 1 : page;
-          const res = await notesApi.list({ page: p, page_size: 20, category: target.category });
-          const data = res.data.data;
-          setNotes(reset ? data.notes : [...notes, ...data.notes]);
-          setTotal(data.total);
-          if (!reset) setPage(p + 1);
-        }
+        const p = reset ? 1 : page;
+        const res = await notesApi.list({
+          page: p,
+          page_size: 20,
+          category_id: target ?? undefined,
+        });
+        const data = res.data.data;
+        setNotes(reset ? data.notes : [...notes, ...data.notes]);
+        setTotal(data.total);
+        if (!reset) setPage(p + 1);
       } catch {
         // 错误处理（与旧版一致：静默失败，列表保持原状）
       } finally {
         setLoading(false);
       }
     },
-    [selectedNode, page, notes]
+    [selectedCategoryId, page, notes]
   );
 
   // 分类树选择变化时重新加载（重置到第 1 页）。
   // 注意：loadNotes 依赖 notes/page，加入依赖数组会导致"加载 → notes 变化 →
-  // loadNotes 身份变化 → effect 重跑"的循环，故仅以 selectedNode 为依赖
+  // loadNotes 身份变化 → effect 重跑"的循环，故仅以 selectedCategoryId 为依赖
   useEffect(() => {
-    loadNotes(true, selectedNode);
+    loadNotes(true, selectedCategoryId);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [selectedNode]);
+  }, [selectedCategoryId]);
+
+  // 移动端：选中分类后自动收起分类树抽屉
+  useEffect(() => {
+    setTreeDrawerOpen(false);
+  }, [selectedCategoryId]);
 
   /** 客户端排序（仅作用于已加载列表；分页数据追加后同样参与排序） */
   const sortedNotes = useMemo(() => {
@@ -324,14 +338,7 @@ export default function NoteList() {
       >
         {/* 折叠时保持挂载（hidden 仅隐藏），展开后树状态（展开节点/数量徽标）不丢失 */}
         <div className={treeCollapsed ? 'hidden' : 'block h-full'}>
-          <CategoryTree
-            selectedKey={selectedNode.key}
-            onSelect={(node) => {
-              setSelectedNode(node);
-              setTreeDrawerOpen(false);
-            }}
-            onToggleCollapse={() => setTreeCollapsed(true)}
-          />
+          <CategoryTree onToggleCollapse={() => setTreeCollapsed(true)} />
         </div>
         {/* 折叠窄条（仅桌面端展示） */}
         {treeCollapsed && (
@@ -375,7 +382,7 @@ export default function NoteList() {
               <PanelLeft size={15} />
             </button>
             <h1 className="text-base font-bold text-[var(--color-text)] truncate">
-              {selectedNode.label}
+              {selectedLabel}
             </h1>
           </div>
 
@@ -384,6 +391,16 @@ export default function NoteList() {
               <span className="text-xs text-[var(--color-text-secondary)]">
                 {t('note.selectedCount', { count: selectedIds.size })}
               </span>
+              <button
+                onClick={() => selectedIds.size > 0 && setMoveDialogOpen(true)}
+                disabled={selectedIds.size === 0}
+                className="p-1.5 rounded-md text-[var(--color-text-secondary)]
+                  hover:bg-[var(--color-surface-alt)] hover:text-[var(--color-accent)]
+                  disabled:opacity-50 transition-colors"
+                title={t('note.moveToCategory')}
+              >
+                <Folder size={15} />
+              </button>
               <button
                 onClick={() => selectedIds.size > 0 && setDeleteTarget('batch')}
                 disabled={selectedIds.size === 0}
@@ -473,16 +490,8 @@ export default function NoteList() {
           ) : notes.length === 0 ? (
             <EmptyState
               icon={<FileText size={48} />}
-              title={
-                selectedNode.key !== 'all' && selectedNode.category === undefined
-                  ? t('note.emptyCategory')
-                  : t('note.empty')
-              }
-              description={
-                selectedNode.key !== 'all' && selectedNode.category === undefined
-                  ? t('note.emptyCategoryDesc')
-                  : t('note.emptyDesc')
-              }
+              title={t('note.empty')}
+              description={t('note.emptyDesc')}
               action={
                 <button
                   onClick={() => navigate('/notes/new')}
@@ -577,6 +586,21 @@ export default function NoteList() {
         variant="danger"
         onConfirm={handleBatchDelete}
         onCancel={() => setDeleteTarget(null)}
+      />
+
+      {/* 批量移动笔记到分类（分类管理功能新增） */}
+      <NoteMoveDialog
+        open={moveDialogOpen}
+        noteIds={Array.from(selectedIds)}
+        onClose={() => setMoveDialogOpen(false)}
+        onMoved={() => {
+          setMoveDialogOpen(false);
+          exitBatchMode();
+          // 重新加载当前分类列表（移动后可能不在当前过滤范围内）
+          setNotes([]);
+          setPage(1);
+          loadNotes(true);
+        }}
       />
     </div>
   );

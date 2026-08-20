@@ -9,7 +9,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { FileText, Search, X } from 'lucide-react';
 import { notesApi } from '../../api/notes';
-import { normalizeCategory } from '../../constants/noteCategories';
 import { useFlipAlignment } from '../../hooks/useFlipAlignment';
 import type { Note } from '../../types/api';
 
@@ -102,8 +101,8 @@ export default function NotePicker({ open, onClose, selectedIds, onToggle }: Pro
               >
                 <FileText size={14} className="flex-shrink-0" />
                 <span className="truncate">{note.title}</span>
-                {normalizeCategory(note.category) && (
-                  <span className="ml-auto text-xs text-[var(--color-text-tertiary)] flex-shrink-0">{normalizeCategory(note.category)}</span>
+                {note.category && (
+                  <span className="ml-auto text-xs text-[var(--color-text-tertiary)] flex-shrink-0">{note.category}</span>
                 )}
               </button>
             );

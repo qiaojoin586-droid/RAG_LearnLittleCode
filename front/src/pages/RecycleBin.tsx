@@ -6,6 +6,7 @@
  * 2. 单条恢复 / 单条彻底删除（双重确认，彻底删除不可恢复）
  * 3. 批量恢复 / 批量彻底删除（勾选模式）
  * 4. 剩余天数标签：绿 >7 天 / 黄 3-7 天 / 红 <3 天
+ * 5. 「分类」tab：已软删除分类列表 + 恢复（级联恢复祖先链，见设计方案 §4.7）
  *
  * 注意：彻底删除会物理删除笔记及其回顾记录（级联），无法恢复。
  */
@@ -13,13 +14,14 @@
 import { useEffect, useState } from 'react';
 import { toast } from 'sonner';
 import {
-  Trash2, RotateCcw, CheckSquare, Square, Inbox, ChevronLeft, ChevronRight,
+  Trash2, RotateCcw, CheckSquare, Square, Inbox, ChevronLeft, ChevronRight, Folder,
 } from 'lucide-react';
 import { notesApi } from '../api/notes';
+import { categoryApi } from '../api/category';
 import ConfirmDialog from '../components/common/ConfirmDialog';
 import EmptyState from '../components/common/EmptyState';
 import type { DeletedNote } from '../types/api';
-import { normalizeCategory } from '../constants/noteCategories';
+import type { DeletedCategory } from '../types/category';
 
 const PAGE_SIZE = 20;
 
@@ -31,6 +33,9 @@ function daysBadgeClass(days: number): string {
 }
 
 export default function RecycleBin() {
+  // tab 切换：笔记 / 分类
+  const [tab, setTab] = useState<'notes' | 'categories'>('notes');
+
   const [notes, setNotes] = useState<DeletedNote[]>([]);
   const [total, setTotal] = useState(0);
   const [page, setPage] = useState(1);
@@ -39,9 +44,46 @@ export default function RecycleBin() {
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
   const [busy, setBusy] = useState(false);
 
+  // 分类回收站状态
+  const [categories, setCategories] = useState<DeletedCategory[]>([]);
+  const [catsLoading, setCatsLoading] = useState(false);
+
   // 确认弹窗状态
   const [singleConfirm, setSingleConfirm] = useState<null | { type: 'restore' | 'permanent'; note: DeletedNote }>(null);
   const [batchConfirm, setBatchConfirm] = useState<null | 'restore' | 'permanent'>(null);
+
+  /** 加载回收站分类列表 */
+  const fetchCategories = async () => {
+    setCatsLoading(true);
+    try {
+      const res = await categoryApi.getRecycleBin();
+      setCategories(res.data.data.categories ?? []);
+    } catch {
+      toast.error('加载分类回收站失败');
+    } finally {
+      setCatsLoading(false);
+    }
+  };
+
+  // 首次进入"分类"tab 时加载（后续每次切换刷新）
+  useEffect(() => {
+    if (tab === 'categories') fetchCategories();
+  }, [tab]);
+
+  /** 恢复分类（级联恢复祖先链） */
+  const handleRestoreCategory = async (cat: DeletedCategory) => {
+    setBusy(true);
+    try {
+      await categoryApi.restore(cat.id);
+      toast.success(`已恢复分类「${cat.name}」`);
+      fetchCategories();
+    } catch (err: unknown) {
+      const error = err as { response?: { data?: { message?: string } } };
+      toast.error(error.response?.data?.message || '恢复失败');
+    } finally {
+      setBusy(false);
+    }
+  };
 
   /** 加载回收站列表 */
   const fetchList = async (targetPage = page) => {
@@ -171,6 +213,32 @@ export default function RecycleBin() {
         )}
       </div>
 
+      {/* tab 切换：笔记 / 分类（分类管理功能新增） */}
+      <div className="flex items-center gap-1 mb-4 p-1 rounded-[var(--radius-md)] border border-[var(--color-border)] bg-[var(--color-bg)] w-fit">
+        <button
+          onClick={() => setTab('notes')}
+          className={`px-4 py-1.5 text-sm rounded-md transition-colors ${
+            tab === 'notes'
+              ? 'bg-[var(--color-accent)] text-white'
+              : 'text-[var(--color-text-secondary)] hover:text-[var(--color-accent)]'
+          }`}
+        >
+          笔记
+        </button>
+        <button
+          onClick={() => setTab('categories')}
+          className={`px-4 py-1.5 text-sm rounded-md transition-colors ${
+            tab === 'categories'
+              ? 'bg-[var(--color-accent)] text-white'
+              : 'text-[var(--color-text-secondary)] hover:text-[var(--color-accent)]'
+          }`}
+        >
+          分类
+        </button>
+      </div>
+
+      {tab === 'notes' ? (
+        <>
       {/* 批量操作栏 */}
       {selectMode && (
         <div className="mb-4 flex items-center gap-3 p-3 rounded-[var(--radius-md)] border border-[var(--color-border)] bg-[var(--color-bg)]">
@@ -250,7 +318,7 @@ export default function RecycleBin() {
                 <p className="mt-1.5 text-xs text-[var(--color-text-tertiary)]">
                   删除时间：
                   {note.deleted_at ? new Date(note.deleted_at).toLocaleString('zh-CN') : '-'}
-                  {normalizeCategory(note.category) ? ` · 分类：${normalizeCategory(note.category)}` : ''}
+                  {note.category ? ` · 分类：${note.category}` : ''}
                 </p>
               </div>
 
@@ -340,6 +408,64 @@ export default function RecycleBin() {
         }}
         onCancel={() => setBatchConfirm(null)}
       />
+        </>
+      ) : (
+        /* ===== 分类回收站（分类管理功能新增，设计 §4.7） ===== */
+        <>
+          {catsLoading ? (
+            <div className="text-center py-16 text-sm text-[var(--color-text-tertiary)]">加载中...</div>
+          ) : categories.length === 0 ? (
+            <div className="rounded-[var(--radius-lg)] border border-[var(--color-border)] bg-[var(--color-card)]">
+              <EmptyState
+                icon={<Inbox size={40} />}
+                title="回收站是空的"
+                description="删除的分类会在这里保留 14 天，期间可以随时恢复。"
+              />
+            </div>
+          ) : (
+            <div className="space-y-3">
+              {categories.map((cat) => (
+                <div
+                  key={cat.id}
+                  className="flex items-center gap-3 p-4 rounded-[var(--radius-lg)] border border-[var(--color-border)] bg-[var(--color-card)] hover:border-[var(--color-accent)] transition-colors"
+                >
+                  {/* 分类信息 */}
+                  <div className="flex-1 min-w-0">
+                    <div className="flex items-center gap-2 flex-wrap">
+                      <span className="text-sm font-medium text-[var(--color-text)] truncate">
+                        {cat.icon ? cat.icon : <Folder size={14} className="inline text-[var(--color-accent)]" />}
+                        {' '}{cat.name}
+                        {cat.descendant_count > 0 && (
+                          <span className="ml-1 text-xs text-[var(--color-text-tertiary)]">
+                            （{cat.descendant_count} 个子分类）
+                          </span>
+                        )}
+                      </span>
+                      <span className={`text-xs px-2 py-0.5 rounded-full ${daysBadgeClass(cat.days_remaining)}`}>
+                        {cat.days_remaining <= 0 ? '即将自动清理' : `剩余 ${cat.days_remaining} 天`}
+                      </span>
+                    </div>
+                    <p className="mt-1.5 text-xs text-[var(--color-text-tertiary)]">
+                      删除时间：
+                      {cat.deleted_at ? new Date(cat.deleted_at).toLocaleString('zh-CN') : '-'}
+                    </p>
+                  </div>
+
+                  {/* 恢复按钮 */}
+                  <button
+                    onClick={() => handleRestoreCategory(cat)}
+                    disabled={busy}
+                    className="flex items-center gap-1.5 px-3 py-1.5 rounded-[var(--radius-md)] text-sm text-[var(--color-accent)] border border-[var(--color-accent)] hover:bg-[var(--color-accent-bg)] disabled:opacity-40 transition-colors shrink-0"
+                  >
+                    <RotateCcw size={14} />
+                    恢复
+                  </button>
+                </div>
+              ))}
+            </div>
+          )}
+        </>
+      )}
     </div>
   );
 }

@@ -52,6 +52,12 @@ class Note(Base):
     
     # 分类
     category: Mapped[str | None] = mapped_column(String(100), nullable=True, index=True)
+
+    # 分类 ID（关联 note_categories 表，双写期间与 category 字符串并行保留；
+    # 分类物理删除时 SET NULL → 笔记变为"未分类"）
+    category_id: Mapped[str | None] = mapped_column(
+        String(36), ForeignKey("note_categories.id", ondelete="SET NULL"), nullable=True, index=True
+    )
     
     # 是否置顶
     is_pinned: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)

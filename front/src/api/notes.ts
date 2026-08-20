@@ -16,8 +16,8 @@ export const notesApi = {
   create: (data: NoteCreate) =>
     client.post<ApiResponse<Note>>(endpoints.note.base, data),
 
-  /** 获取笔记列表（分页） */
-  list: (params?: { page?: number; page_size?: number; category?: string }) =>
+  /** 获取笔记列表（分页；category_id 优先，__uncategorized__ = 未分类） */
+  list: (params?: { page?: number; page_size?: number; category?: string; category_id?: string }) =>
     client.get<ApiResponse<NoteListResponse>>(endpoints.note.base, { params }),
 
   /** 获取笔记详情 */
@@ -43,6 +43,14 @@ export const notesApi = {
   /** 彻底删除笔记（不可恢复） */
   permanentDelete: (id: string) =>
     client.delete<ApiResponse<null>>(endpoints.note.permanent(id)),
+
+  /** 移动笔记到分类（categoryId 为空 = 移为未分类） */
+  moveToCategory: (id: string, categoryId: string | null) =>
+    client.put<ApiResponse<Note>>(
+      endpoints.note.moveCategory(id),
+      null,
+      { params: categoryId ? { category_id: categoryId } : {} }
+    ),
 
   /** 语义搜索 */
   search: (data: NoteSearchRequest) =>

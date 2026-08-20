@@ -279,19 +279,38 @@ def create_agent_tools(
 
         from sqlalchemy import select, func
         from app.models.note import Note
+        from app.models.category import NoteCategory
 
         async with db_session_factory() as db:
+            # 分类管理功能：按 category_id 关联分类名称统计（排除软删除分类）
             result = await db.execute(
-                select(Note.category, func.count())
-                .where(Note.user_id == user_id, Note.deleted_at.is_(None))
-                .group_by(Note.category)
+                select(NoteCategory.name, func.count())
+                .join(Note, Note.category_id == NoteCategory.id)
+                .where(
+                    Note.user_id == user_id,
+                    Note.deleted_at.is_(None),
+                    NoteCategory.deleted_at.is_(None),
+                )
+                .group_by(NoteCategory.id, NoteCategory.name)
             )
-            stats = result.all()
+            stats = list(result.all())
 
-            if not stats:
+            # 未分类笔记（category_id IS NULL）
+            uncategorized = await db.execute(
+                select(func.count()).select_from(Note).where(
+                    Note.user_id == user_id,
+                    Note.deleted_at.is_(None),
+                    Note.category_id.is_(None),
+                )
+            )
+            uncategorized_count = uncategorized.scalar() or 0
+
+            if not stats and uncategorized_count == 0:
                 return "暂无笔记"
 
-            lines = [f"- {cat or '未分类'}: {count} 篇" for cat, count in stats]
+            lines = [f"- {name}: {count} 篇" for name, count in stats]
+            if uncategorized_count:
+                lines.append(f"- 未分类: {uncategorized_count} 篇")
             return "笔记分类统计:\n" + "\n".join(lines)
 
     @tool
@@ -328,6 +347,31 @@ def create_agent_tools(
             await db.commit()
             return f"回顾完成！下次回顾时间: {review.next_review_at.strftime('%Y-%m-%d')}"
 
+    async def _resolve_category(db, category_name: str):
+        """
+        将分类名称解析为 (category_id, category_name)（透明 name→ID 适配，设计 §8.3）
+
+        未找到匹配分类时返回 (None, 原字符串)——降级写入 category 字符串，
+        笔记不丢失，后续可在分类树中看到（作为新分类或归入对应分类）。
+        """
+        if not category_name:
+            return None, None
+
+        from sqlalchemy import select
+        from app.models.category import NoteCategory
+
+        result = await db.execute(
+            select(NoteCategory).where(
+                NoteCategory.user_id == user_id,
+                NoteCategory.name == category_name,
+                NoteCategory.deleted_at.is_(None),
+            )
+        )
+        cat = result.scalar_one_or_none()
+        if cat:
+            return cat.id, cat.name
+        return None, category_name
+
     @tool
     async def create_note_tool(title: str, content: str, tags: str = "", category: str = "") -> str:
         """
@@ -347,9 +391,14 @@ def create_agent_tools(
         tag_list = [t.strip() for t in tags.split(",") if t.strip()] if tags else []
 
         async with db_session_factory() as db:
+            # 分类管理功能：name→ID 透明解析，双写两个字段（未匹配时降级保留字符串）
+            category_id, category_name = await _resolve_category(db, category)
             note = await note_service.create_note(
                 db, user_id,
-                NoteCreate(title=title, content=content, tags=tag_list, category=category)
+                NoteCreate(
+                    title=title, content=content, tags=tag_list,
+                    category=category_name, category_id=category_id,
+                )
             )
             await db.commit()
             return f"笔记创建成功！ID: {note.id}, 标题: {note.title}"
@@ -380,14 +429,18 @@ def create_agent_tools(
             update_data["content"] = content
         if tags is not None:
             update_data["tags"] = [t.strip() for t in tags.split(",") if t.strip()]
-        if category is not None:
-            update_data["category"] = category
 
-        if not update_data:
+        if not update_data and category is None:
             return "未提供任何要更新的字段"
 
         async with db_session_factory() as db:
             try:
+                # 分类管理功能：name→ID 透明解析，双写两个字段（未匹配时降级保留字符串）
+                if category is not None:
+                    category_id, category_name = await _resolve_category(db, category)
+                    update_data["category"] = category_name
+                    update_data["category_id"] = category_id
+
                 note = await note_service.update_note(
                     db, note_id, user_id, NoteUpdate(**update_data)
                 )

@@ -17,10 +17,11 @@ import { ArrowLeft, Save, Download, Bold, Italic, Heading1, Heading2, Code, List
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import rehypeHighlight from 'rehype-highlight';
-import { normalizeCategory } from '../constants/noteCategories';
 import 'highlight.js/styles/github.css';
 import { notesApi } from '../api/notes';
 import TagInput from '../components/common/TagInput';
+import { useCategoryStore } from '../stores/useCategoryStore';
+import { flattenCategories } from '../types/category';
 import { isHtml, htmlToMarkdown, normalizeNoteContent, escapeInlineHtml } from '../utils/markdownCompat';
 import type { Note } from '../types/api';
 
@@ -49,8 +50,10 @@ export default function NoteEditor({ note, onCreated, onUpdated, onBackMobile }:
     return normalizeNoteContent(isHtml(raw) ? htmlToMarkdown(raw) : raw);
   });
   const [tags, setTags] = useState<string[]>(note?.tags ?? []);
-  // 分类归一化：非标准分类（如历史脏数据）统一归为"其他"
-  const [category, setCategory] = useState(normalizeCategory(note?.category) || '');
+  // 分类改为按 category_id 关联（后端双写同步 category 字符串）；
+  // 空串 = 未分类（显式传 null 给后端清除关联）
+  const [categoryId, setCategoryId] = useState(note?.category_id ?? '');
+  const { categories, fetchCategories } = useCategoryStore();
   const [isPinned, setIsPinned] = useState(note?.is_pinned ?? false);
   const [editorMode, setEditorMode] = useState<EditorMode>('split');
   const textareaRef = useRef<HTMLTextAreaElement>(null);
@@ -63,11 +66,15 @@ export default function NoteEditor({ note, onCreated, onUpdated, onBackMobile }:
     }
     try {
       if (note) {
-        const res = await notesApi.update(note.id, { title, content, tags, category, is_pinned: isPinned });
+        const res = await notesApi.update(note.id, {
+          title, content, tags, category_id: categoryId || null, is_pinned: isPinned,
+        });
         toast.success('保存成功');
         onUpdated(res.data.data);
       } else {
-        const res = await notesApi.create({ title, content, tags, category, is_pinned: isPinned });
+        const res = await notesApi.create({
+          title, content, tags, category_id: categoryId || undefined, is_pinned: isPinned,
+        });
         toast.success('创建成功');
         onCreated(res.data.data);
       }
@@ -191,16 +198,17 @@ export default function NoteEditor({ note, onCreated, onUpdated, onBackMobile }:
         <div className="w-40">
           <label className="block text-xs text-[var(--color-text-tertiary)] mb-1">{t('note.category')}</label>
           <select
-            value={category}
-            onChange={(e) => setCategory(e.target.value)}
+            value={categoryId}
+            onChange={(e) => setCategoryId(e.target.value)}
+            onFocus={() => categories.length === 0 && fetchCategories()}
             className="w-full px-2 py-1 text-sm rounded-lg border border-[var(--color-border)] bg-[var(--color-card)] text-[var(--color-text)] focus:outline-none focus:border-[var(--color-accent)] transition-all duration-200"
           >
-            <option value="">未分类</option>
-            <option value="工作">工作</option>
-            <option value="学习">学习</option>
-            <option value="生活">生活</option>
-            <option value="技术">技术</option>
-            <option value="其他">其他</option>
+            <option value="">{t('note.uncategorized')}</option>
+            {flattenCategories(categories).map(({ category: c, depth }) => (
+              <option key={c.id} value={c.id}>
+                {' '.repeat(depth * 3) + (c.icon ? `${c.icon} ` : '') + c.name}
+              </option>
+            ))}
           </select>
         </div>
         <div className="flex items-end">

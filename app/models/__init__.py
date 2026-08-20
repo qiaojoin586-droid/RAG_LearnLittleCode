@@ -7,6 +7,7 @@
 from app.models.base import Base
 from app.models.user import User
 from app.models.note import Note
+from app.models.category import NoteCategory
 from app.models.chat import ChatSession, ChatMessage
 from app.models.review import ReviewRecord
 from app.models.note_template import NoteTemplate
@@ -19,6 +20,7 @@ __all__ = [
     "Base",
     "User",
     "Note",
+    "NoteCategory",
     "ChatSession",
     "ChatMessage",
     "ReviewRecord",

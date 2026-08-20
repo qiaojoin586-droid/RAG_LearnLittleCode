@@ -432,6 +432,7 @@ from app.routers import (
     user,
     chat,
     note_router,
+    category_router,
     knowledge_router,
     review_router,
     note_template_router,
@@ -450,6 +451,7 @@ API_PREFIX = "/api/v1"
 app.include_router(user.router, prefix=API_PREFIX, tags=["User & Auth"])
 app.include_router(chat.router, prefix=API_PREFIX, tags=["Chat"])
 app.include_router(note_router.router, prefix=API_PREFIX, tags=["Note"])
+app.include_router(category_router.router, prefix=API_PREFIX, tags=["Category"])
 app.include_router(knowledge_router.router, prefix=API_PREFIX, tags=["Knowledge"])
 app.include_router(review_router.router, prefix=API_PREFIX, tags=["Review"])
 app.include_router(note_template_router.router, prefix=API_PREFIX, tags=["Note Template"])

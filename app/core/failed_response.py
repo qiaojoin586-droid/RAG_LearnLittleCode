@@ -52,11 +52,13 @@ class ErrorCode:
     DOCUMENT_NOT_FOUND = 40404          # 知识库文档不存在
     DEVICE_SESSION_NOT_FOUND = 40405    # 设备会话不存在
     ATTACHMENT_NOT_FOUND = 40406        # 聊天附件不存在
-    
+    CATEGORY_NOT_FOUND = 40407          # 分类不存在
+
     # 409xx - 冲突
     USERNAME_EXISTS = 40901             # 用户名已存在
     IDEMPOTENCY_DUPLICATE = 40902       # 幂等键重复（消息重复提交）
     EMAIL_EXISTS = 40903                # 邮箱已被占用
+    CATEGORY_NAME_EXISTS = 40904        # 同级分类下已存在同名分类
     
     # 429xx - 限流
     GLOBAL_RATE_LIMIT = 42901           # 全局频率限制
@@ -90,9 +92,11 @@ _ERROR_MESSAGES = {
     ErrorCode.DOCUMENT_NOT_FOUND: "知识库文档不存在",
     ErrorCode.DEVICE_SESSION_NOT_FOUND: "设备会话不存在",
     ErrorCode.ATTACHMENT_NOT_FOUND: "聊天附件不存在",
+    ErrorCode.CATEGORY_NOT_FOUND: "分类不存在",
     ErrorCode.USERNAME_EXISTS: "用户名已存在",
     ErrorCode.IDEMPOTENCY_DUPLICATE: "请求重复提交",
     ErrorCode.EMAIL_EXISTS: "该邮箱已被使用",
+    ErrorCode.CATEGORY_NAME_EXISTS: "同级分类下已存在同名分类",
     ErrorCode.GLOBAL_RATE_LIMIT: "请求频率过高，请稍后再试",
     ErrorCode.ENDPOINT_RATE_LIMIT: "该接口请求频率过高，请稍后再试",
     ErrorCode.INTERNAL_ERROR: "服务器内部错误",
