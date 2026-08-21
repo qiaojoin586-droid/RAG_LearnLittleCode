@@ -76,6 +76,8 @@ export const endpoints = {
     move: (id: string) => `${API_PREFIX}/category/${id}/move`,
     /** POST 从回收站恢复分类 */
     restore: (id: string) => `${API_PREFIX}/category/${id}/restore`,
+    /** DELETE 彻底删除分类（回收站，物理删除不可恢复） */
+    permanent: (id: string) => `${API_PREFIX}/category/${id}/permanent`,
     /** POST 批量重排同级分类顺序 */
     reorder: `${API_PREFIX}/category/reorder`,
     /** POST 批量操作（删除/合并） */

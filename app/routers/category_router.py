@@ -18,6 +18,8 @@ from typing import Optional
 from fastapi import APIRouter, Depends
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.logger_handler import logger
+from app.core.failed_response import BusinessError
 from app.core.success_response import success_response
 from app.db.database import get_db
 from app.schemas.category import (
@@ -135,6 +137,18 @@ async def restore_category(
     return success_response(data=result, message="分类恢复成功")
 
 
+@router.delete("/category/{category_id}/permanent", summary="彻底删除分类")
+async def permanent_delete_category(
+    category_id: str,
+    user_id: str = Depends(get_current_user_id),
+    db: AsyncSession = Depends(get_db),
+):
+    """彻底删除回收站中的分类（物理删除，不可恢复；软删除态的子孙一并清除）"""
+    result = await _category_service.permanent_delete_category(db, user_id, category_id)
+    await db.commit()  # 显式 commit（同 create_category 注释）
+    return success_response(data=result, message="分类已彻底删除")
+
+
 @router.post("/category/reorder", summary="批量重排分类顺序")
 async def reorder_categories(
     data: CategoryReorder,
@@ -154,10 +168,12 @@ async def batch_operation(
     db: AsyncSession = Depends(get_db),
 ):
     """
-    批量操作分类（软删除 / 合并）
+    批量操作分类（软删除 / 合并 / 彻底删除 / 恢复）
 
     - delete：批量软删除多个分类（各自级联处理子分类和笔记）
     - merge：将源分类下的笔记和子分类全部移至 merge_target_id，然后软删除源分类
+    - permanent_delete：批量彻底删除回收站中的分类（物理删除，不可恢复）
+    - restore：批量从回收站恢复分类（级联恢复祖先链）
     """
     if data.operation == 'delete':
         total_notes = 0
@@ -177,13 +193,43 @@ async def batch_operation(
             message=f"批量删除完成：{len(data.category_ids)} 个分类",
         )
 
-    result = await _category_service.merge_categories(
-        db, user_id, data.category_ids, data.merge_target_id
-    )
+    if data.operation == 'merge':
+        result = await _category_service.merge_categories(
+            db, user_id, data.category_ids, data.merge_target_id
+        )
+        await db.commit()  # 显式 commit（同 create_category 注释）
+        return success_response(
+            data={"operation": "merge", **result},
+            message=f"合并完成：{result['merged_count']} 个分类已并入目标分类",
+        )
+
+    # permanent_delete / restore：逐条处理并收集失败项（与 /note/batch 同模式，
+    # 部分失败不影响其余条目；restore 级联恢复祖先可能导致后续条目"已恢复"报错，属预期）
+    success_ids = []
+    errors = []
+    for cid in data.category_ids:
+        try:
+            if data.operation == 'permanent_delete':
+                await _category_service.permanent_delete_category(db, user_id, cid)
+            else:
+                await _category_service.restore_category(db, user_id, cid)
+            success_ids.append(cid)
+        except BusinessError as e:
+            errors.append({"category_id": cid, "error": str(e)})
+            logger.warning(f"批量{data.operation}单条失败: category_id={cid}, error={e}")
+
     await db.commit()  # 显式 commit（同 create_category 注释）
+
+    action_label = "彻底删除" if data.operation == 'permanent_delete' else "恢复"
     return success_response(
-        data={"operation": "merge", **result},
-        message=f"合并完成：{result['merged_count']} 个分类已并入目标分类",
+        data={
+            "operation": data.operation,
+            "total": len(data.category_ids),
+            "success_count": len(success_ids),
+            "error_count": len(errors),
+            "errors": errors if errors else None,
+        },
+        message=f"批量{action_label}完成：成功 {len(success_ids)} 个，失败 {len(errors)} 个",
     )
 
 

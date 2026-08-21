@@ -43,7 +43,10 @@ class CategoryReorder(BaseModel):
 class CategoryBatchOperation(BaseModel):
     """分类批量操作请求"""
     category_ids: List[str] = Field(..., min_length=1, description="分类 ID 列表")
-    operation: Literal['delete', 'merge'] = Field(..., description="操作类型")
+    operation: Literal['delete', 'merge', 'permanent_delete', 'restore'] = Field(
+        ..., description="操作类型：delete 批量软删除 / merge 批量合并 / "
+        "permanent_delete 批量彻底删除（回收站）/ restore 批量恢复（回收站）"
+    )
     merge_target_id: Optional[str] = Field(None, description="合并目标分类 ID（merge 时必填）")
 
     @model_validator(mode='after')

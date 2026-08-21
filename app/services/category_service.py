@@ -462,21 +462,81 @@ class CategoryService:
         )
         return impact
 
+    async def _promote_active_children(self, db: AsyncSession, cat: NoteCategory) -> None:
+        """
+        将某分类下未软删除的直接子分类提升为顶级（物理删除前的防御保护）
+
+        设计流程下活跃节点父链必完整（恢复会级联恢复祖先），多层孤儿不可达，
+        此处仅检查直接子级作为防御代码（与 cleanup_expired_categories 共用）。
+        """
+        active_children = (
+            await db.execute(
+                select(NoteCategory.id).where(
+                    NoteCategory.parent_id == cat.id,
+                    NoteCategory.user_id == cat.user_id,
+                    NoteCategory.deleted_at.is_(None),
+                )
+            )
+        ).scalars().all()
+        if not active_children:
+            return
+
+        # 重算 sort_order 避免与现有顶级分类撞值
+        max_order = await db.execute(
+            select(func.max(NoteCategory.sort_order)).where(
+                NoteCategory.user_id == cat.user_id,
+                NoteCategory.parent_id.is_(None),
+            )
+        )
+        base = (max_order.scalar() or 0) + 1
+        for i, cid in enumerate(active_children):
+            await db.execute(
+                update(NoteCategory)
+                .where(NoteCategory.id == cid)
+                .values(parent_id=None, sort_order=base + i)
+            )
+
+    async def permanent_delete_category(
+        self, db: AsyncSession, user_id: str, category_id: str
+    ) -> dict:
+        """
+        彻底删除回收站中的分类（物理删除，不可恢复）
+
+        - 必须在回收站中（deleted_at 非空），否则 404
+        - 软删除态的子孙由 parent_id ON DELETE CASCADE 一并物理清除
+        - 活跃子分类（防御边界情况）先提升为顶级再删
+        - 笔记由 category_id ON DELETE SET NULL 兜底（正常流程软删除时已清空关联）
+        """
+        cat = await self._get_deleted_category(db, user_id, category_id)
+
+        # 活跃子分类保护（与 cleanup_expired_categories 同一防御逻辑）
+        await self._promote_active_children(db, cat)
+
+        await db.delete(cat)
+        await db.flush()
+
+        logger.info(f"分类彻底删除: category_id={cat.id}, name={cat.name}, user_id={user_id}")
+        return {"deleted_name": cat.name}
+
     async def restore_category(
         self, db: AsyncSession, user_id: str, category_id: str
     ) -> dict:
         """
-        从回收站恢复分类（级联恢复祖先链，防止断链）
+        从回收站恢复分类（级联恢复祖先链 + 子孙分类）
 
         ⚠️ 正确性说明：若只恢复当前分类，而父分类仍在回收站，会出现：
         a) 树按 parent_id 构建时该节点不可见（断链）
         b) 14 天后物理清理父分类时，ON DELETE CASCADE 会物理删除已恢复的子分类
         因此恢复时必须级联恢复所有已软删除的祖先，确保 parent_id 链完整。
+
+        同时一并恢复当前分类的全部软删除子孙：删除时子孙随父级一起进了回收站，
+        若恢复只带回父级而子分类留在回收站，用户会误以为子分类"丢失"。
+        同级同名冲突时整体拒绝（先改名或先恢复现有分类再试）。
         """
         cat = await self._get_deleted_category(db, user_id, category_id)
 
-        # 向上遍历 parent_id 链，收集已软删除的祖先
-        restored: List[NoteCategory] = [cat]
+        # 1. 向上遍历 parent_id 链，收集已软删除的祖先
+        to_restore: List[NoteCategory] = [cat]
         current_id = cat.parent_id
         while current_id:
             result = await db.execute(
@@ -489,22 +549,42 @@ class CategoryService:
             if not ancestor:
                 break
             if ancestor.deleted_at is not None:
-                restored.append(ancestor)
-                ancestor.deleted_at = None
+                to_restore.append(ancestor)
             current_id = ancestor.parent_id
 
-        cat.deleted_at = None
+        # 2. 收集当前分类的全部已软删除子孙（递归，仅当前分类的子树，
+        #    祖先分类的其他分支不受影响）
+        all_cats = (
+            await db.execute(
+                select(NoteCategory).where(NoteCategory.user_id == user_id)
+            )
+        ).scalars().all()
+        children_map: Dict[Optional[str], List[NoteCategory]] = defaultdict(list)
+        for c in all_cats:
+            children_map[c.parent_id].append(c)
 
-        # 同级同名校验：恢复后若与现有活跃分类同名则拒绝（提示先重命名现有分类）
-        for r in restored:
+        def collect_deleted_children(node: NoteCategory) -> None:
+            for child in children_map.get(node.id, []):
+                if child.deleted_at is not None:
+                    to_restore.append(child)
+                    collect_deleted_children(child)
+
+        collect_deleted_children(cat)
+
+        # 3. 同级同名校验（先校验后修改：任一冲突则整体拒绝，事务回滚）
+        for r in to_restore:
             await self.check_same_name(db, user_id, r.name, r.parent_id, exclude_id=r.id)
+
+        # 4. 统一清除 deleted_at
+        for r in to_restore:
+            r.deleted_at = None
 
         await db.flush()
 
         logger.info(
-            f"分类恢复成功: category_id={cat.id}, 级联恢复 {len(restored)} 个（含祖先链）"
+            f"分类恢复成功: category_id={cat.id}, 级联恢复 {len(to_restore)} 个（祖先 + 子孙）"
         )
-        return {"restored_count": len(restored)}
+        return {"restored_count": len(to_restore)}
 
     # ========== 移动 / 重排 / 合并 ==========
 
@@ -743,31 +823,10 @@ class CategoryService:
             return 0
 
         # 活跃子分类保护：物理删除前将有未软删除直接子分类的父级先"斩断"
-        # （将活跃子分类提升为顶级，并重算 sort_order 避免与现有顶级撞值）
+        # （将活跃子分类提升为顶级；注：恢复操作会级联恢复祖先链，
+        # 因此设计流程下活跃节点父链必完整，此处仅防御边界情况）
         for cat in expired:
-            active_children = (
-                await db.execute(
-                    select(NoteCategory.id).where(
-                        NoteCategory.parent_id == cat.id,
-                        NoteCategory.user_id == cat.user_id,
-                        NoteCategory.deleted_at.is_(None),
-                    )
-                )
-            ).scalars().all()
-            if active_children:
-                max_order = await db.execute(
-                    select(func.max(NoteCategory.sort_order)).where(
-                        NoteCategory.user_id == cat.user_id,
-                        NoteCategory.parent_id.is_(None),
-                    )
-                )
-                base = (max_order.scalar() or 0) + 1
-                for i, cid in enumerate(active_children):
-                    await db.execute(
-                        update(NoteCategory)
-                        .where(NoteCategory.id == cid)
-                        .values(parent_id=None, sort_order=base + i)
-                    )
+            await self._promote_active_children(db, cat)
 
         # 物理删除（parent_id ON DELETE CASCADE 会一并清除软删除的子孙；
         # 笔记的 category_id ON DELETE SET NULL 自动置空）

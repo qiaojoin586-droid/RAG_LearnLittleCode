@@ -126,6 +126,8 @@ const zh = {
   'note.categoryColor': '颜色',
   'note.categoryNameRequired': '请输入分类名称',
   'note.categoryCreated': '分类创建成功',
+  'note.categoryLoadFailed': '分类加载失败，请重试',
+  'note.retry': '重试',
   'note.categoryUpdated': '分类更新成功',
   'note.categoryDeleted': '分类已删除',
   'note.categoryMoved': '分类移动成功',

@@ -126,6 +126,8 @@ const en = {
   'note.categoryColor': 'Color',
   'note.categoryNameRequired': 'Please enter a category name',
   'note.categoryCreated': 'Category created',
+  'note.categoryLoadFailed': 'Failed to load categories, please retry',
+  'note.retry': 'Retry',
   'note.categoryUpdated': 'Category updated',
   'note.categoryDeleted': 'Category deleted',
   'note.categoryMoved': 'Category moved',

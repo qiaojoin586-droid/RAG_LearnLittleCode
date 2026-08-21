@@ -34,6 +34,10 @@ export const categoryApi = {
   restore: (id: string) =>
     client.post<ApiResponse<unknown>>(endpoints.category.restore(id)),
 
+  /** 彻底删除分类（回收站，物理删除不可恢复） */
+  permanentDelete: (id: string) =>
+    client.delete<ApiResponse<unknown>>(endpoints.category.permanent(id)),
+
   /** 移动分类（改父级；null = 移到顶级） */
   move: (id: string, data: CategoryMove) =>
     client.post<ApiResponse<unknown>>(endpoints.category.move(id), data),

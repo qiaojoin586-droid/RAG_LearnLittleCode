@@ -24,6 +24,8 @@ interface CategoryState {
   uncategorizedCount: number;
   selectedCategoryId: string | null;
   loading: boolean;
+  /** 加载失败标记（非空时树区域展示失败提示与重试按钮） */
+  error: string | null;
 
   fetchCategories: () => Promise<void>;
   createCategory: (data: CategoryCreate) => Promise<void>;
@@ -47,6 +49,7 @@ export const useCategoryStore = create<CategoryState>((set, get) => ({
   uncategorizedCount: 0,
   selectedCategoryId: null,
   loading: false,
+  error: null,
 
   fetchCategories: async () => {
     set({ loading: true });
@@ -56,9 +59,11 @@ export const useCategoryStore = create<CategoryState>((set, get) => ({
       set({
         categories: data.categories ?? [],
         uncategorizedCount: data.uncategorized_count ?? 0,
+        error: null,
       });
     } catch {
-      // 加载失败静默（树渲染为空，用户可重试）
+      // 加载失败不再静默：置 error，树区域展示失败提示与重试按钮
+      set({ error: 'categoryFetchFailed' });
     } finally {
       set({ loading: false });
     }

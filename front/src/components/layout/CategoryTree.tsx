@@ -253,7 +253,7 @@ function DragPreview({ node }: { node: Category }) {
 export default function CategoryTree({ onToggleCollapse }: CategoryTreeProps) {
   const { t } = useTranslation();
   const {
-    categories, uncategorizedCount, selectedCategoryId,
+    categories, uncategorizedCount, selectedCategoryId, error,
     fetchCategories, selectCategory, moveCategory, reorderCategories,
   } = useCategoryStore();
 
@@ -538,6 +538,22 @@ export default function CategoryTree({ onToggleCollapse }: CategoryTreeProps) {
         }}
       >
         <div className="flex-1 overflow-y-auto p-2">
+          {/* 加载失败提示：不再静默，展示重试入口（便于定位问题） */}
+          {error && categories.length === 0 && (
+            <div className="flex flex-col items-center gap-2 py-6 px-2">
+              <span className="text-xs text-[var(--color-text-tertiary)]">
+                {t('note.categoryLoadFailed')}
+              </span>
+              <button
+                onClick={() => fetchCategories()}
+                className="px-3 py-1 text-xs rounded-lg border border-[var(--color-border)]
+                  text-[var(--color-accent)] hover:bg-[var(--color-accent-bg)] transition-colors"
+              >
+                {t('note.retry')}
+              </button>
+            </div>
+          )}
+
           {/* 伪节点：所有笔记 / 未分类 */}
           {renderPseudoRow(
             'all',

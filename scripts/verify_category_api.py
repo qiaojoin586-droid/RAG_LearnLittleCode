@@ -226,11 +226,45 @@ async def main():
             check("回收站包含已删除分类", "测试顶级" in names, f"实际 {names}")
 
             r = await api(client, "POST", f"/category/{lvl2_id}/restore", token)
-            check("恢复子分类（级联恢复祖先链）", r.status_code == 200, print_api_error(r))
+            check("恢复子分类（级联恢复祖先链 + 子孙）", r.status_code == 200, print_api_error(r))
 
             r = await api(client, "GET", "/category/tree", token)
-            names = [c["name"] for c in r.json()["data"]["categories"]]
-            check("恢复后父链完整（测试顶级可见）", "测试顶级" in names, f"实际 {names}")
+            top_nodes = {c["name"]: c for c in r.json()["data"]["categories"]}
+            check("恢复后父链完整（测试顶级可见）", "测试顶级" in top_nodes, f"实际 {list(top_nodes)}")
+            restored_children = [c["name"] for c in top_nodes.get("测试顶级", {}).get("children", [])]
+            check("恢复父级时子孙一并恢复（测试二级可见）", "测试二级" in restored_children,
+                  f"实际 {restored_children}")
+
+            # 3.8 回收站批量操作与彻底删除
+            r = await api(client, "DELETE", f"/category/{top_id}", token)
+            check("重新软删除（准备批量操作数据）", r.status_code == 200, print_api_error(r))
+
+            # 彻底删除活跃（未入回收站）分类应被拒绝
+            r = await api(client, "DELETE", f"/category/{lvl3_id}/permanent", token)
+            check("彻底删除未入回收站的分类被拒绝（404）", r.status_code == 404,
+                  f"status={r.status_code} {print_api_error(r)}")
+
+            # 单条彻底删除（lvl2 随 top_id 一并软删除，在回收站中）
+            r = await api(client, "DELETE", f"/category/{lvl2_id}/permanent", token)
+            check("单条彻底删除回收站分类", r.status_code == 200, print_api_error(r))
+
+            # 批量恢复
+            r = await api(client, "POST", "/category/batch", token,
+                          json={"category_ids": [top_id], "operation": "restore"})
+            check("批量恢复", r.status_code == 200
+                  and r.json()["data"]["success_count"] == 1, print_api_error(r))
+
+            # 再次软删除 → 批量彻底删除
+            await api(client, "DELETE", f"/category/{top_id}", token)
+            r = await api(client, "POST", "/category/batch", token,
+                          json={"category_ids": [top_id], "operation": "permanent_delete"})
+            check("批量彻底删除", r.status_code == 200
+                  and r.json()["data"]["success_count"] == 1, print_api_error(r))
+
+            r = await api(client, "GET", "/category/recycle-bin", token)
+            check("回收站已清空", r.status_code == 200
+                  and len(r.json()["data"]["categories"]) == 0,
+                  f"实际 {len(r.json()['data']['categories'])} 个")
 
         # 4. 清理
         async with async_session_factory() as db:

@@ -58,7 +58,7 @@ export interface CategoryReorder {
 /** 分类批量操作请求 */
 export interface CategoryBatchOperation {
   category_ids: string[];
-  operation: 'delete' | 'merge';
+  operation: 'delete' | 'merge' | 'permanent_delete' | 'restore';
   merge_target_id?: string;
 }
 
