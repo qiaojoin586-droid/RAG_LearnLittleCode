@@ -9,7 +9,7 @@
 import uuid
 from datetime import datetime
 
-from sqlalchemy import String, Text, DateTime, Boolean, ForeignKey, JSON, func
+from sqlalchemy import String, Text, DateTime, Boolean, ForeignKey, JSON, func, Index
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.models.base import Base
@@ -30,7 +30,16 @@ class Note(Base):
     - 一对多 → ReviewRecord（回顾记录）
     """
     __tablename__ = "notes"
-    
+
+    # MySQL FULLTEXT 索引（ngram 双字分词）：keyword_search 的 MATCH AGAINST 提速
+    # 存量库由 Alembic 迁移 b7e2c9d4a5f6 创建；此处保证新装库（create_all）结构一致
+    __table_args__ = (
+        Index(
+            "ft_notes_title_content", "title", "content",
+            mysql_prefix="FULLTEXT", mysql_with_parser="ngram",
+        ),
+    )
+
     # 主键：UUID
     id: Mapped[str] = mapped_column(
         String(36), primary_key=True, default=lambda: str(uuid.uuid4())

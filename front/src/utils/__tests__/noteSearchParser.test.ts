@@ -161,4 +161,78 @@ describe('parseSearchResults', () => {
     expect(block!.results).toHaveLength(2);
     expect(block!.suffix).toContain('需要查看某篇笔记的完整内容吗？');
   });
+
+  it('加固：摘要续行夹在列表中间时并入上一条目，不再残留编号列表', () => {
+    const content = [
+      '找到以下与测试相关的笔记：',
+      '',
+      '笔记甲 - 描述甲',
+      '笔记乙 - 描述乙',
+      '额外的摘要续行内容',
+      '2. 笔记丙 - 描述丙',
+      '3. 笔记丁 - 描述丁',
+    ].join('\n');
+
+    const block = parseSearchResults(content);
+    expect(block).not.toBeNull();
+    expect(block!.results).toHaveLength(4);
+    expect(block!.results[0].title).toBe('笔记甲');
+    // 续行并入上一条目的摘要
+    expect(block!.results[1].title).toBe('笔记乙');
+    expect(block!.results[1].excerpt).toContain('额外的摘要续行内容');
+    expect(block!.results[2].title).toBe('笔记丙');
+    expect(block!.results[3].title).toBe('笔记丁');
+    // 编号列表不再残留在 suffix
+    expect(block!.suffix.trim()).toBe('');
+  });
+
+  it('真实回复（用户提供）：条目间空行 + 分类/核心内容元数据 → 全量卡片，收尾句进 suffix', () => {
+    const content = [
+      '找到了几篇和 Agent 相关的笔记，内容如下：',
+      '',
+      '1. AI Agent 领域最新进展',
+      '分类：技术调研 | 标签：AI Agent, 行业动态, LangChain',
+      '核心内容：',
+      '行业正进入 "Agentic Era"，企业应用快速内置任务型 AI Agent',
+      '提及 Google Gemini、Moonshot Kimi、Anthropic Claude 等主流产品的 Agent 能力更新',
+      'LangChain/LangGraph 成为主流开发框架生态',
+      '涉及安全治理挑战与开发者建议',
+      '注：原笔记标题或内容中若包含"2026年8月"等未来时间戳，可能为数据录入错误或预测性内容，请核实实际时效性。',
+      '',
+      '2. Agent与LLM的区别',
+      '分类：技术 | 标签：AI, LLM, Agent',
+      '核心内容：',
+      'LLM 是"大脑"（概率预测模型），Agent 是"完整的人"（具备感知、规划、记忆和工具使用能力）',
+      '关键差异：交互模式、工具使用、记忆机制、环境感知、目标导向',
+      '应用场景：LLM 适合单点任务，Agent 适合端到端任务流',
+      '',
+      '需要我获取某篇笔记的完整内容吗？',
+    ].join('\n');
+
+    const block = parseSearchResults(content);
+    expect(block).not.toBeNull();
+    // 条目间空行不再中断列表：两条全部解析为卡片
+    expect(block!.results).toHaveLength(2);
+    expect(block!.results[0].title).toBe('AI Agent 领域最新进展');
+    expect(block!.results[1].title).toBe('Agent与LLM的区别');
+    // 收尾句进 suffix
+    expect(block!.suffix).toContain('需要我获取某篇笔记的完整内容吗？');
+  });
+
+  it('畸形输出（首条无编号无标题，直接是原始字段）：安全降级为原文，不产生标题错位的假卡片', () => {
+    const content = [
+      '找到以下与 Agent 相关的笔记：',
+      '',
+      '分类',
+      '技术调研 | 标签：AI Agent, 2026, 行业动态, LangChain',
+      '',
+      '核心内容',
+      '2026 被称为 "Agentic Era"，企业应用正快速内置任务型 AI Agent',
+      '2. Agent与LLM的区别',
+      '分类：技术 | 标签：AI, LLM, Agent',
+    ].join('\n');
+
+    // 首条标题缺失，无法可靠重建 → 整体不卡片化（原样渲染）
+    expect(parseSearchResults(content)).toBeNull();
+  });
 });

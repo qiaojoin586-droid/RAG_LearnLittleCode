@@ -1,8 +1,9 @@
 /**
  * 全局搜索模态框（v2 阶段四，Cmd/Ctrl+K 唤起）
  *
- * 数据源策略（不动后端，前端聚合）：
- * - 笔记：语义搜索 notesApi.search（检索质量最高，第一阶段核心）
+ * 数据源策略（前端聚合）：
+ * - 笔记：notesApi.search（后端 MySQL 关键词搜索，标题命中优先；
+ *   语义搜索仅由 AI 对话的 search_notes_tool 使用）
  * - 会话：sessionsApi.list() 全量拉取后客户端按标题过滤
  * - 知识库：knowledgeApi.listDocuments() 客户端按文件名过滤
  *
@@ -13,6 +14,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
+import { toast } from 'sonner';
 import { Search, FileText, MessageSquare, Library, X } from 'lucide-react';
 import { notesApi } from '../../api/notes';
 import { sessionsApi } from '../../api/sessions';
@@ -74,7 +76,8 @@ export default function GlobalSearchModal({ onClose, onOpenAssistant }: GlobalSe
         if (!cancelled) setNoteResults((res.data.data?.results ?? []).map((r) => r.note));
       })
       .catch(() => {
-        // 搜索失败静默处理
+        // 搜索失败（网络/外部嵌入服务瞬时异常）：明确提示用户重试，不再静默
+        if (!cancelled) toast.error(t('gsearch.searchFailed'));
       })
       .finally(() => {
         if (!cancelled) setSearching(false);
@@ -82,7 +85,7 @@ export default function GlobalSearchModal({ onClose, onOpenAssistant }: GlobalSe
     return () => {
       cancelled = true;
     };
-  }, [tab, debouncedQuery]);
+  }, [tab, debouncedQuery, t]);
 
   // 客户端过滤
   const filteredSessions = sessions.filter((s) =>

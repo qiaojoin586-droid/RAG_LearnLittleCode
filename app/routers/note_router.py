@@ -201,14 +201,19 @@ async def permanent_delete_note(
     return success_response(message="笔记已彻底删除")
 
 
-@router.post("/note/search", summary="语义搜索")
+@router.post("/note/search", summary="关键词搜索")
 async def search_notes(
     data: NoteSearchRequest,
     user_id: str = Depends(get_current_user_id),
     db: AsyncSession = Depends(get_db),
 ):
-    """基于 ChromaDB 的语义搜索"""
-    results = await _get_note_service().semantic_search(db, user_id, data.query, data.top_k)
+    """基于 MySQL 的标题/正文关键词搜索（LIKE 模糊匹配）
+
+    不依赖外部 Embedding 服务，稳定零外部依赖；响应格式保持
+    {query, results: [{note, score}]}，score 仅作排序权重（标题命中 1.0 > 正文命中 0.5）。
+    语义搜索仍保留给 AI 对话的 search_notes_tool 使用（note_service.semantic_search）。
+    """
+    results = await _get_note_service().keyword_search(db, user_id, data.query, data.top_k)
     return success_response(data={
         "query": data.query,
         "results": [

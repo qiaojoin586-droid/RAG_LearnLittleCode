@@ -654,9 +654,111 @@ class NoteService:
             for note in notes
         ]
         sorted_results.sort(key=lambda x: x[1], reverse=True)
-        
+
         return sorted_results
-    
+
+    async def keyword_search(
+        self, db: AsyncSession, user_id: str, query: str, top_k: int = 5
+    ) -> List[Tuple[Note, float]]:
+        """
+        关键词搜索笔记（MySQL FULLTEXT 优先 + LIKE 兜底，不依赖外部 Embedding 服务）
+
+        策略：
+        1. 关键词 ≥2 字符 → MATCH AGAINST（ngram 双字分词，相关度 + 更新时间排序）
+        2. 单字符 / FULLTEXT 无命中 / 索引缺失等异常 → LIKE 字面匹配兜底
+        score 仅作排序权重（标题命中 1.0 > 正文命中 0.5；FULLTEXT 相关度命中 0.9），
+        非语义相似度。语义搜索（semantic_search）仍保留给 AI 对话的 search_notes_tool 使用。
+
+        Args:
+            db: 数据库会话
+            user_id: 用户 ID
+            query: 搜索关键词
+            top_k: 返回结果数量
+
+        Returns:
+            [(Note, score), ...] 按权重降序排列
+        """
+        keyword = (query or "").strip()
+        if not keyword:
+            return []
+
+        # ngram 分词最小 token 为 2 字符：单字符关键词直接走 LIKE
+        if len(keyword) < 2:
+            return await self._like_search(db, user_id, keyword, top_k)
+
+        # FULLTEXT 优先：MATCH AGAINST 自然语言模式（ngram 支持中文/英文子串）
+        try:
+            match_expr = func.match(Note.title, Note.content).against(keyword)
+            result = await db.execute(
+                select(Note)
+                .where(
+                    and_(
+                        Note.user_id == user_id,
+                        Note.deleted_at.is_(None),
+                        match_expr,
+                    )
+                )
+                .order_by(match_expr.desc(), Note.updated_at.desc())
+                .limit(top_k)
+            )
+            notes = list(result.scalars().all())
+            if notes:
+                return [(n, 0.9) for n in notes]
+        except Exception as e:
+            # FULLTEXT 索引缺失/方言不支持等异常 → LIKE 兜底，保证搜索始终可用
+            logger.warning(f"FULLTEXT 查询失败，回退 LIKE: {type(e).__name__}: {e}")
+
+        # LIKE 兜底：FULLTEXT 无命中（符号/罕见词）时保证字面匹配
+        return await self._like_search(db, user_id, keyword, top_k)
+
+    async def _like_search(
+        self, db: AsyncSession, user_id: str, keyword: str, top_k: int
+    ) -> List[Tuple[Note, float]]:
+        """
+        LIKE 字面匹配兜底（标题命中优先于正文命中，同类内按更新时间倒序）
+        """
+        # 转义 LIKE 通配符（% 与 _ 按字面匹配）
+        escaped = (
+            keyword.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+        )
+        pattern = f"%{escaped}%"
+
+        # 1) 标题命中（优先级高）
+        title_result = await db.execute(
+            select(Note)
+            .where(
+                and_(
+                    Note.user_id == user_id,
+                    Note.deleted_at.is_(None),
+                    Note.title.like(pattern, escape="\\"),
+                )
+            )
+            .order_by(Note.updated_at.desc())
+            .limit(top_k)
+        )
+        title_notes = list(title_result.scalars().all())
+        results: List[Tuple[Note, float]] = [(n, 1.0) for n in title_notes]
+
+        # 2) 正文命中补齐（排除已命中的标题笔记）
+        remaining = top_k - len(title_notes)
+        if remaining > 0:
+            conds = [
+                Note.user_id == user_id,
+                Note.deleted_at.is_(None),
+                Note.content.like(pattern, escape="\\"),
+            ]
+            if title_notes:
+                conds.append(Note.id.not_in([n.id for n in title_notes]))
+            content_result = await db.execute(
+                select(Note)
+                .where(and_(*conds))
+                .order_by(Note.updated_at.desc())
+                .limit(remaining)
+            )
+            results.extend((n, 0.5) for n in content_result.scalars().all())
+
+        return results
+
     async def _sync_to_vector(self, note: Note) -> None:
         """
         异步同步笔记到 ChromaDB 向量库（notes_collection）

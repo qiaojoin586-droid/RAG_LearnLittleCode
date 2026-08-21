@@ -33,8 +33,9 @@ import '../../../i18n';
 import CategoryTree from '../CategoryTree';
 import { categoryApi } from '../../../api/category';
 import { useCategoryStore } from '../../../stores/useCategoryStore';
+import type { Category } from '../../../types/category';
 
-function makeCategory(id: string, name: string, children: any[] = []): any {
+function makeCategory(id: string, name: string, children: Category[] = []): Category {
   return {
     id, name, parent_id: null, icon: null, color: null, sort_order: 0,
     created_at: '2026-08-21T00:00:00', updated_at: '2026-08-21T00:00:00',
@@ -69,7 +70,7 @@ describe('CategoryTree 渲染', () => {
   });
 
   it('正常数据：树渲染所有分类名与数量徽标', async () => {
-    (categoryApi.getTree as any).mockResolvedValue(mockTree);
+    vi.mocked(categoryApi.getTree).mockResolvedValue(mockTree as never);
 
     await act(async () => {
       root.render(<CategoryTree />);
@@ -88,9 +89,9 @@ describe('CategoryTree 渲染', () => {
   });
 
   it('空数据：仅渲染伪节点（所有笔记/未分类），不崩溃', async () => {
-    (categoryApi.getTree as any).mockResolvedValue({
+    vi.mocked(categoryApi.getTree).mockResolvedValue({
       data: { data: { categories: [], uncategorized_count: 0 } },
-    });
+    } as never);
 
     await act(async () => {
       root.render(<CategoryTree />);
@@ -103,7 +104,7 @@ describe('CategoryTree 渲染', () => {
   });
 
   it('API 报错：静默降级为伪节点，不崩溃', async () => {
-    (categoryApi.getTree as any).mockRejectedValue(new Error('network'));
+    vi.mocked(categoryApi.getTree).mockRejectedValue(new Error('network'));
 
     await act(async () => {
       root.render(<CategoryTree />);

@@ -29,6 +29,7 @@ const en = {
   'gsearch.searching': 'Searching...',
   'gsearch.hint': 'Type to start searching',
   'gsearch.empty': 'No results',
+  'gsearch.searchFailed': 'Search failed. Please retry later (network or external service issue)',
 
   // AI assistant panel (v2)
   'assistant.title': "Hi, I'm YUNYUN ~",

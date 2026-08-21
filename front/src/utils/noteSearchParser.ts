@@ -40,7 +40,7 @@ export interface ParsedSearchBlock {
  * 规则：动词（找到/搜索/检索/查询/搜到/查到）+ 数量「N 篇」或「以下」+ 笔记 + 行尾冒号。
  * 只含动词+笔记的普通过渡句（如"我帮你搜索了相关笔记："）不算引导语。
  */
-const INTRO_RE = /^[ \t]*[^\n]*?(?:找到|搜索|检索|查询|搜到|查到)了?(?:\s*\d+\s*篇|以下)[^\n]*?笔记[^\n]*?[:：]\s*/m;
+const INTRO_RE = /^[ \t]*[^\n]*?(?:找到|搜索|检索|查询|搜到|查到)了?(?:\s*(?:\d+|几)\s*篇|以下)[^\n]*?笔记[^\n]*?[:：]\s*/m;
 
 /** 编号/圆点条目前缀（`1.` / `1、` / `1)` / `-` / `*`，后随空格可选） */
 const LIST_PREFIX_RE = /^(\d+[.、)]|[-*])\s*(.+)$/;
@@ -115,7 +115,17 @@ export function parseSearchResults(content: string): ParsedSearchBlock | null {
 
   while (i < lines.length && results.length < maxItems) {
     const trimmed = lines[i].trim();
-    if (!trimmed) break; // 空行：列表结束
+    if (!trimmed) {
+      // 空行：若下一非空行仍是编号/圆点条目且已有解析结果，
+      // 视为条目之间的分隔空行（AI 常见排版），跳过继续解析
+      let k = i + 1;
+      while (k < lines.length && !lines[k].trim()) k++;
+      if (k < lines.length && results.length > 0 && LIST_PREFIX_RE.test(lines[k].trim())) {
+        i = k;
+        continue;
+      }
+      break; // 否则：列表结束
+    }
 
     const prefixMatch = trimmed.match(LIST_PREFIX_RE);
     if (prefixMatch) {
@@ -137,7 +147,23 @@ export function parseSearchResults(content: string): ParsedSearchBlock | null {
       // 无数量引导语时，仅接受含「标题 - 描述」分隔符的行，
       // 防止把列表后的收尾句（如"需要查看某篇笔记的完整内容吗？"）吞成条目
       const hasSeparator = TITLE_SEPARATORS.some((s) => trimmed.includes(s));
-      if (!hasSeparator && !hasCount) break;
+      if (!hasSeparator && !hasCount) {
+        // 加固：若下一非空行仍是编号/圆点条目，说明列表还在继续，
+        // 本行是上一条目的摘要续行——并入上一条摘要后继续解析，
+        // 避免"卡片区 + 下方残留编号列表"的混合样式与重复展示
+        const nextNonBlank = lines.slice(i + 1).find((l) => l.trim());
+        const listContinues = !!nextNonBlank && LIST_PREFIX_RE.test(nextNonBlank.trim());
+        if (!listContinues) break;
+        if (results.length > 0) {
+          const last = results[results.length - 1];
+          results[results.length - 1] = {
+            ...last,
+            excerpt: [last.excerpt, trimmed].filter(Boolean).join(' '),
+          };
+        }
+        i++;
+        continue;
+      }
       const item = parseItemText(trimmed, '');
       if (item.title) results.push(item);
       i++;

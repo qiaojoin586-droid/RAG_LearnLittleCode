@@ -29,6 +29,7 @@ const zh = {
   'gsearch.searching': '搜索中...',
   'gsearch.hint': '输入关键词开始搜索',
   'gsearch.empty': '无匹配结果',
+  'gsearch.searchFailed': '搜索失败，请稍后重试（网络或外部服务异常）',
 
   // AI 对话浮层（v2 新增）
   'assistant.title': 'Hi, 我是 小云云 ~',
