@@ -9,7 +9,8 @@
 - POST /category/{category_id}/move - 移动分类（改父级）
 - POST /category/{category_id}/restore - 从回收站恢复分类（级联恢复祖先链）
 - POST /category/reorder - 批量重排同级分类顺序
-- POST /category/batch - 批量操作（删除/合并）
+- POST /category/batch - 批量操作（delete 软删除 / merge 合并 / permanent_delete 彻底删除 / restore 恢复）
+- DELETE /category/{category_id}/permanent - 彻底删除分类（回收站，物理删除）
 - GET /category/recycle-bin - 回收站分类列表
 """
 

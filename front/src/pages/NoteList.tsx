@@ -14,7 +14,7 @@ import { useState, useEffect, useCallback, useMemo } from 'react';
 import { useNavigate, useParams, useLocation } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
 import { toast } from 'sonner';
-import { Plus, CheckSquare, LayoutGrid, Trash2, X, FileText, PanelLeft, ChevronLeft, ChevronRight, Folder } from 'lucide-react';
+import { CheckSquare, LayoutGrid, Trash2, X, FileText, PanelLeft, ChevronLeft, ChevronRight, Folder } from 'lucide-react';
 import { notesApi } from '../api/notes';
 import { useNoteContextStore } from '../stores/useNoteContextStore';
 import EmptyState from '../components/common/EmptyState';
@@ -25,6 +25,7 @@ import NoteCardItem from '../components/layout/NoteCardItem';
 import NotePreviewPanel from '../components/layout/NotePreviewPanel';
 import NoteMoveDialog from '../components/note/NoteMoveDialog';
 import NoteEditor from './NoteEditor';
+import NoteFormatPicker from '../components/layout/NoteFormatPicker';
 import { useCategoryStore, UNCATEGORIZED_SENTINEL } from '../stores/useCategoryStore';
 import { findCategory } from '../types/category';
 import type { Note } from '../types/api';
@@ -314,6 +315,10 @@ export default function NoteList() {
   /** 详情区是否激活（选中笔记或新建模式） */
   const detailActive = isNewMode || selectedNote !== null;
 
+  /** 新建模式文档类型（/notes/new?format=txt|md，默认 md） */
+  const newFormat: 'md' | 'txt' =
+    new URLSearchParams(location.search).get('format') === 'txt' ? 'txt' : 'md';
+
   /** 渲染一张笔记卡片（回调均为稳定引用，配合 NoteCardItem 的 React.memo） */
   const renderNoteCard = (note: Note) => (
     <NoteCardItem
@@ -459,15 +464,8 @@ export default function NoteList() {
                 <CheckSquare size={15} />
               </button>
 
-              {/* 新建笔记（蓝色主色调） */}
-              <button
-                onClick={() => navigate('/notes/new')}
-                className="p-1.5 rounded-md bg-[var(--color-accent)] text-white
-                  hover:bg-[var(--color-accent-hover)] transition-colors"
-                title={t('note.create')}
-              >
-                <Plus size={15} />
-              </button>
+              {/* 新建笔记（文档类型功能：点击弹出类型选择，默认 Markdown） */}
+              <NoteFormatPicker />
 
               {/* 折叠本栏（v2 交互优化：收起为窄条，详情区自动加宽） */}
               <button
@@ -555,8 +553,9 @@ export default function NoteList() {
       <div className={`${detailActive ? 'flex' : 'hidden'} md:flex flex-1 min-w-0 flex-col`}>
         {detailActive ? (
           <NoteEditor
-            key={selectedNote?.id ?? 'new'}
+            key={`${selectedNote?.id ?? 'new'}-${newFormat}`}
             note={selectedNote}
+            initialFormat={newFormat}
             onCreated={handleNoteCreated}
             onUpdated={handleNoteUpdated}
             onBackMobile={() => navigate('/notes')}

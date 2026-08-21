@@ -55,7 +55,13 @@ class Note(Base):
     
     # 笔记内容（Markdown 格式）
     content: Mapped[str] = mapped_column(Text, nullable=False)
-    
+
+    # 文档类型：md = Markdown（默认）/ txt = 纯文本
+    # 仅新建时写入（NoteUpdate 不含该字段，已创建笔记不可改类型）；VARCHAR 预留扩展
+    format: Mapped[str] = mapped_column(
+        String(10), nullable=False, server_default="md"
+    )
+
     # 标签列表（JSON 数组，如 ["Python", "FastAPI", "RAG"]）
     tags: Mapped[list | None] = mapped_column(JSON, nullable=True, default=list)
     

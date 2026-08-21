@@ -16,7 +16,7 @@ import uuid
 
 from typing import List, Optional, Tuple
 
-from sqlalchemy import select, update, func, and_, or_
+from sqlalchemy import select, update, func, and_, or_, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.logger_handler import logger
@@ -81,6 +81,8 @@ class NoteService:
             tags=note_data.tags or [],
             category=note_data.category,
             is_pinned=note_data.is_pinned,
+            # 文档类型（md/txt）：仅新建时写入；AI 工具不传时默认 'md'
+            format=note_data.format or 'md',
         )
 
         # 双写：category_id 优先，同时将 category 字符串同步为分类名
@@ -687,19 +689,27 @@ class NoteService:
             return await self._like_search(db, user_id, keyword, top_k)
 
         # FULLTEXT 优先：MATCH AGAINST 自然语言模式（ngram 支持中文/英文子串）
+        # 注意：SQLAlchemy 的 func.match().against() 不是合法构造（Function 无 against），
+        # 用 text() 绑定参数实现（表名固定为 notes；关键词经 execute 参数绑定，防注入）
         try:
-            match_expr = func.match(Note.title, Note.content).against(keyword)
+            match_where = text(
+                "MATCH (notes.title, notes.content) AGAINST (:kw IN NATURAL LANGUAGE MODE)"
+            )
+            match_order = text(
+                "MATCH (notes.title, notes.content) AGAINST (:kw IN NATURAL LANGUAGE MODE) DESC"
+            )
             result = await db.execute(
                 select(Note)
                 .where(
                     and_(
                         Note.user_id == user_id,
                         Note.deleted_at.is_(None),
-                        match_expr,
+                        match_where,
                     )
                 )
-                .order_by(match_expr.desc(), Note.updated_at.desc())
-                .limit(top_k)
+                .order_by(match_order, Note.updated_at.desc())
+                .limit(top_k),
+                {"kw": keyword},
             )
             notes = list(result.scalars().all())
             if notes:

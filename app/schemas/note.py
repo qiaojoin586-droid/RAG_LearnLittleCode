@@ -18,6 +18,10 @@ class NoteCreate(BaseModel):
     category: Optional[str] = Field(None, max_length=100, description="分类")
     category_id: Optional[str] = Field(None, max_length=36, description="分类 ID（双写期间与 category 并行，优先使用）")
     is_pinned: bool = Field(False, description="是否置顶")
+    # 文档类型：md = Markdown（默认）/ txt = 纯文本；仅新建时写入
+    format: Optional[str] = Field(
+        'md', pattern='^(md|txt)$', description="文档类型"
+    )
 
 
 class NoteUpdate(BaseModel):
@@ -40,6 +44,7 @@ class NoteResponse(BaseModel):
     category: Optional[str] = None
     category_id: Optional[str] = None  # 分类 ID（双写期间与 category 并行返回）
     is_pinned: bool
+    format: str = 'md'  # 文档类型（md/txt；旧数据兼容默认 md）
     created_at: datetime
     updated_at: datetime
     deleted_at: Optional[datetime] = None   # 删除时间（回收站展示用，正常笔记为 None）

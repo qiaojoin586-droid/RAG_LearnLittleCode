@@ -1,28 +1,16 @@
 /**
- * 笔记格式推断工具（v2，不动后端）
+ * 笔记格式（文档类型功能，2026-08-21 起后端 notes.format 字段落库）
  *
- * 后端 Note 类型无 format 字段，采用客户端启发式推断：
- * content 含 Markdown 语法特征 → 'md'，否则 'txt'。
- * 将来后端增加 format 字段后，仅需替换本文件的 detectNoteFormat 实现。
+ * - 新建笔记时用户可选 md（Markdown，默认）/ txt（纯文本）
+ * - 列表徽章与编辑器模式按后端 format 字段渲染
+ * - 存量数据 / 字段缺失 / 未知值一律兜底 'md'（兼容旧数据与异常）
  */
 
 export type NoteFormat = 'md' | 'txt';
 
-/** Markdown 语法特征（标题/列表/代码块/链接/引用/加粗/有序列表） */
-const MD_PATTERNS: RegExp[] = [
-  /^#{1,6}\s+/m,
-  /^[-*+]\s+/m,
-  /^>\s/m,
-  /```/,
-  /\[[^\]]+\]\([^)]+\)/,
-  /\*\*[^*]+\*\*/,
-  /^\d+\.\s+/m,
-];
-
-/** 推断笔记格式 */
-export function detectNoteFormat(content: string): NoteFormat {
-  if (!content) return 'txt';
-  return MD_PATTERNS.some((p) => p.test(content)) ? 'md' : 'txt';
+/** 归一化后端 format 字段：仅 'txt' 判为纯文本，其余（含缺失/未知）兜底 'md' */
+export function detectNoteFormat(format?: string | null): NoteFormat {
+  return format === 'txt' ? 'txt' : 'md';
 }
 
 /**

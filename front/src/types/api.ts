@@ -104,6 +104,8 @@ export interface Note {
   /** 分类 ID（双写期间与 category 并行返回） */
   category_id: string | null;
   is_pinned: boolean;
+  /** 文档类型：md = Markdown / txt = 纯文本（旧数据兼容默认 'md'） */
+  format: string;
   created_at: string;
   updated_at: string;
   /** 删除时间（回收站中的笔记有值，正常笔记为 null） */
@@ -132,6 +134,8 @@ export interface NoteCreate {
   /** 分类 ID（优先；后端自动同步 category 字符串） */
   category_id?: string;
   is_pinned?: boolean;
+  /** 文档类型：md = Markdown（默认）/ txt = 纯文本；仅新建时写入 */
+  format?: 'md' | 'txt';
 }
 
 /** 更新笔记请求 */

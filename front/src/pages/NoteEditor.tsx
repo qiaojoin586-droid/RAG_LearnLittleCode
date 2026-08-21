@@ -23,6 +23,7 @@ import TagInput from '../components/common/TagInput';
 import { useCategoryStore } from '../stores/useCategoryStore';
 import { flattenCategories } from '../types/category';
 import { isHtml, htmlToMarkdown, normalizeNoteContent, escapeInlineHtml } from '../utils/markdownCompat';
+import { detectNoteFormat, type NoteFormat } from '../utils/noteFormat';
 import type { Note } from '../types/api';
 
 type EditorMode = 'edit' | 'split' | 'preview';
@@ -30,6 +31,8 @@ type EditorMode = 'edit' | 'split' | 'preview';
 interface NoteEditorProps {
   /** 要编辑的笔记（列表已加载完整数据）；null = 新建模式 */
   note: Note | null;
+  /** 新建模式的文档类型（/notes/new?format= 参数；已有笔记读 note.format） */
+  initialFormat?: 'md' | 'txt';
   /** 新建保存成功后回调（父级刷新列表并切换选中） */
   onCreated: (note: Note) => void;
   /** 更新保存成功后回调（父级同步列表卡片数据） */
@@ -38,8 +41,12 @@ interface NoteEditorProps {
   onBackMobile?: () => void;
 }
 
-export default function NoteEditor({ note, onCreated, onUpdated, onBackMobile }: NoteEditorProps) {
+export default function NoteEditor({ note, initialFormat, onCreated, onUpdated, onBackMobile }: NoteEditorProps) {
   const { t } = useTranslation();
+
+  // 文档类型：已有笔记读 note.format；新建模式读 URL 参数；缺失/未知兜底 'md'
+  const noteFormat: NoteFormat = detectNoteFormat(note?.format ?? initialFormat);
+  const isTxt = noteFormat === 'txt';
 
   // 父组件以 key 重挂载，直接用 props 初始化状态（切换笔记无残留）
   const [title, setTitle] = useState(note?.title ?? '');
@@ -72,8 +79,10 @@ export default function NoteEditor({ note, onCreated, onUpdated, onBackMobile }:
         toast.success('保存成功');
         onUpdated(res.data.data);
       } else {
+        // 新建时写入所选文档类型（md/txt）
         const res = await notesApi.create({
           title, content, tags, category_id: categoryId || undefined, is_pinned: isPinned,
+          format: noteFormat,
         });
         toast.success('创建成功');
         onCreated(res.data.data);
@@ -89,12 +98,14 @@ export default function NoteEditor({ note, onCreated, onUpdated, onBackMobile }:
       toast.error('标题不能为空');
       return;
     }
-    const mdContent = `# ${title}\n\n${content}`;
-    const blob = new Blob([mdContent], { type: 'text/markdown;charset=utf-8' });
+    // 导出按文档类型适配：md → `# 标题` + Markdown 正文；txt → 纯正文
+    const ext = isTxt ? 'txt' : 'md';
+    const fileContent = isTxt ? content : `# ${title}\n\n${content}`;
+    const blob = new Blob([fileContent], { type: 'text/plain;charset=utf-8' });
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
-    a.download = `${title.replace(/[\\/:*?"<>|]/g, '_')}.md`;
+    a.download = `${title.replace(/[\\/:*?"<>|]/g, '_')}.${ext}`;
     document.body.appendChild(a);
     a.click();
     document.body.removeChild(a);
@@ -224,9 +235,14 @@ export default function NoteEditor({ note, onCreated, onUpdated, onBackMobile }:
         </div>
       </div>
 
-      {/* Markdown 分栏编辑器（flex-1 填充第三栏剩余高度） */}
+      {/* 编辑区：md 双栏（工具栏 + 分栏预览）/ txt 纯文本单栏（文档类型功能） */}
       <div className="flex-1 min-h-[300px] border border-[var(--color-border)] rounded-xl bg-[var(--color-card)] overflow-hidden shadow-[var(--shadow-card)] flex flex-col">
-        {/* 工具栏 */}
+        {/* 工具栏：仅 Markdown 模式显示；纯文本模式仅显示类型标签 */}
+        {isTxt ? (
+          <div className="flex items-center justify-end px-2 py-1.5 border-b border-[var(--color-border)] bg-[var(--color-surface)] shrink-0">
+            <span className="text-xs text-[var(--color-text-tertiary)] select-none">{t('note.format.txt')}</span>
+          </div>
+        ) : (
         <div className="flex flex-wrap items-center gap-0.5 px-2 py-1.5 border-b border-[var(--color-border)] bg-[var(--color-surface)] shrink-0">
           {editorMode !== 'preview' && toolbarActions.map((item, i) =>
             'type' in item && item.type === 'divider' ? (
@@ -283,11 +299,23 @@ export default function NoteEditor({ note, onCreated, onUpdated, onBackMobile }:
                 <Eye size={14} />
               </button>
             </div>
-            <span className="text-xs text-[var(--color-text-tertiary)] select-none ml-1">Markdown</span>
+            <span className="text-xs text-[var(--color-text-tertiary)] select-none ml-1">{t('note.format.md')}</span>
           </div>
         </div>
+        )}
 
         {/* 内容区域（flex-1 填充，替代原 calc(100vh-380px) 视口高度） */}
+        {isTxt ? (
+          /* 纯文本模式：单栏 textarea，无预览、无语法工具栏 */
+          <textarea
+            ref={textareaRef}
+            value={content}
+            onChange={(e) => setContent(e.target.value)}
+            placeholder={t('note.content')}
+            className="flex-1 w-full resize-none p-4 text-sm leading-relaxed text-[var(--color-text)] bg-transparent outline-none min-h-0"
+            spellCheck={false}
+          />
+        ) : (
         <div className="flex flex-1 min-h-0">
           {/* 左侧：Markdown 源码编辑 */}
           {editorMode !== 'preview' && (
@@ -338,6 +366,7 @@ export default function NoteEditor({ note, onCreated, onUpdated, onBackMobile }:
             </div>
           )}
         </div>
+        )}
       </div>
     </div>
   );

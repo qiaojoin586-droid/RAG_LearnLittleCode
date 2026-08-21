@@ -46,7 +46,7 @@ export const categoryApi = {
   reorder: (data: CategoryReorder) =>
     client.post<ApiResponse<unknown>>(endpoints.category.reorder, data),
 
-  /** 批量操作（删除/合并） */
+  /** 批量操作（delete 软删除 / merge 合并 / permanent_delete 彻底删除 / restore 恢复） */
   batch: (data: CategoryBatchOperation) =>
     client.post<ApiResponse<unknown>>(endpoints.category.batch, data),
 

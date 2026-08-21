@@ -54,6 +54,9 @@ async def create_note(
 ):
     """创建新笔记，自动触发向量双写和异步标签生成"""
     note = await _get_note_service().create_note(db, user_id, data)
+    # 显式 commit：调用方紧随其后读取列表，避免 get_db auto-commit
+    # 在响应发送后才落地的竞态（与 category_router 写操作同一约定）
+    await db.commit()
     return success_response(data=NoteResponse.model_validate(note).model_dump())
 
 
@@ -130,6 +133,8 @@ async def update_note(
 ):
     """更新笔记内容，同步更新向量"""
     note = await _get_note_service().update_note(db, note_id, user_id, data)
+    # 显式 commit（写操作统一约定，见 move_note_to_category 注释）
+    await db.commit()
     return success_response(data=NoteResponse.model_validate(note).model_dump())
 
 
@@ -156,6 +161,8 @@ async def delete_note(
 ):
     """软删除笔记（移入回收站）"""
     await _get_note_service().delete_note(db, note_id, user_id)
+    # 显式 commit（写操作统一约定，见 move_note_to_category 注释）
+    await db.commit()
     return success_response(message="笔记已删除")
 
 
@@ -170,6 +177,9 @@ async def restore_note(
 ):
     """从回收站恢复笔记（清除 deleted_at + 重建 ChromaDB 向量）"""
     await _get_note_service().restore_note(db, note_id, user_id)
+    # 显式 commit：前端恢复成功后立即重拉回收站列表，
+    # 避免 auto-commit 落库晚于刷新请求（条目"恢复后仍在"的竞态）
+    await db.commit()
     return success_response(message="笔记已恢复")
 
 
@@ -198,6 +208,9 @@ async def permanent_delete_note(
         )
 
     await _get_note_service().permanent_delete(db, note_id, user_id)
+    # 显式 commit：前端彻底删除成功后立即重拉回收站列表，
+    # 避免 auto-commit 落库晚于刷新请求（条目"删除后仍在"的竞态——本 bug 根因）
+    await db.commit()
     return success_response(message="笔记已彻底删除")
 
 

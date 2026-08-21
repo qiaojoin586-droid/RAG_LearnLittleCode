@@ -3,7 +3,7 @@
  *
  * 卡片从上到下：
  * - 右上角：收藏星星（is_pinned 切换，notesApi.update）+ 删除垃圾桶（软删除进回收站）
- * - 标题（加粗单行省略）+ MD/TXT 格式徽章（客户端启发式推断 utils/noteFormat.ts）
+ * - 标题（加粗单行省略）+ MD 格式徽章（系统为 Markdown 笔记应用，统一显示 MD）
  * - 内容摘要（灰色小字，2 行省略）
  * - 浅青绿色标签（tags 前 3 个）
  * - 底部：分类名 + 发布日期
@@ -48,7 +48,8 @@ function NoteCardItem({
   onOpen,
 }: NoteCardItemProps) {
   const { t } = useTranslation();
-  const format = detectNoteFormat(note.content);
+  // 类型徽章读后端 format 字段（缺失/未知兜底 'md'）
+  const format = detectNoteFormat(note.format);
   const pinned = note.is_pinned;
 
   return (
@@ -122,13 +123,7 @@ function NoteCardItem({
       {/* 标题行 + 格式徽章 */}
       <div className="flex items-center gap-2 mb-2 pr-14">
         <h3 className="text-sm font-semibold text-[var(--color-text)] truncate flex-1">{note.title}</h3>
-        <span
-          className={`px-1.5 py-0.5 text-[10px] font-medium rounded shrink-0 ${
-            format === 'md'
-              ? 'bg-[var(--color-badge-md-bg)] text-[var(--color-badge-md-text)]'
-              : 'bg-[var(--color-badge-txt-bg)] text-[var(--color-badge-txt-text)]'
-          }`}
-        >
+        <span className="px-1.5 py-0.5 text-[10px] font-medium rounded shrink-0 bg-[var(--color-badge-md-bg)] text-[var(--color-badge-md-text)]">
           {format.toUpperCase()}
         </span>
       </div>
