@@ -281,40 +281,41 @@ def create_agent_tools(
         if not db_session_factory:
             return "数据库未初始化"
 
-        from sqlalchemy import select, func
+        from sqlalchemy import and_, func, select
         from app.models.note import Note
         from app.models.category import NoteCategory
 
         async with db_session_factory() as db:
-            # 分类管理功能：按 category_id 关联分类名称统计（排除软删除分类）
+            # 单次 LEFT JOIN 合并原两次查询（分类统计 + 未分类统计），语义与原实现一致：
+            # - category_id IS NULL → 归入"未分类"（COALESCE 兜底）
+            # - 分类已删但笔记未删 → 不计入任何统计（原实现内连接排除此类笔记，
+            #   未分类统计也只查 IS NULL；此处用 WHERE 显式排除保持同语义）
+            category_name = func.coalesce(NoteCategory.name, "未分类").label("category_name")
             result = await db.execute(
-                select(NoteCategory.name, func.count())
-                .join(Note, Note.category_id == NoteCategory.id)
+                select(category_name, func.count().label("note_count"))
+                .select_from(Note)
+                .outerjoin(
+                    NoteCategory,
+                    and_(
+                        Note.category_id == NoteCategory.id,
+                        NoteCategory.deleted_at.is_(None),
+                    ),
+                )
                 .where(
                     Note.user_id == user_id,
                     Note.deleted_at.is_(None),
-                    NoteCategory.deleted_at.is_(None),
+                    (Note.category_id.is_(None)) | (NoteCategory.id.is_not(None)),
                 )
                 .group_by(NoteCategory.id, NoteCategory.name)
             )
             stats = list(result.all())
 
-            # 未分类笔记（category_id IS NULL）
-            uncategorized = await db.execute(
-                select(func.count()).select_from(Note).where(
-                    Note.user_id == user_id,
-                    Note.deleted_at.is_(None),
-                    Note.category_id.is_(None),
-                )
-            )
-            uncategorized_count = uncategorized.scalar() or 0
-
-            if not stats and uncategorized_count == 0:
+            if not stats:
                 return "暂无笔记"
 
-            lines = [f"- {name}: {count} 篇" for name, count in stats]
-            if uncategorized_count:
-                lines.append(f"- 未分类: {uncategorized_count} 篇")
+            # 未分类行固定排在最后（与原实现输出顺序一致）
+            rows = sorted(stats, key=lambda r: r[0] == "未分类")
+            lines = [f"- {name}: {count} 篇" for name, count in rows]
             return "笔记分类统计:\n" + "\n".join(lines)
 
     @tool
