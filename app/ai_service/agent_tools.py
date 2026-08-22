@@ -25,12 +25,11 @@ from datetime import datetime
 from pathlib import Path
 from typing import Optional, List
 
-import httpx
-
 from langchain_core.tools import tool
 
 from app.ai_service.tool_registry import init_tool_registry, tool_registry
 from app.core.logger_handler import logger
+from app.utils.factory import get_shared_async_client
 
 
 # ============================================================
@@ -95,13 +94,16 @@ async def translate_text(text: str, target_lang: str, source_lang: str = "") -> 
     if source_lang:
         params["source_lang"] = source_lang.upper()
     try:
-        async with httpx.AsyncClient(timeout=15) as client:
-            resp = await client.post(
-                base_url, data=params,
-                headers={"Authorization": f"DeepL-Auth-Key {api_key}"},
-            )
-            resp.raise_for_status()
-            result = resp.json()
+        # 复用共享 httpx 客户端（TCP/TLS 连接复用），
+        # timeout=15 为请求级超时，覆盖共享客户端默认 120s
+        client = get_shared_async_client()
+        resp = await client.post(
+            base_url, data=params,
+            headers={"Authorization": f"DeepL-Auth-Key {api_key}"},
+            timeout=15,
+        )
+        resp.raise_for_status()
+        result = resp.json()
     except Exception as e:
         logger.error(f"DeepL 翻译失败: {e}")
         return f"翻译失败：{e}。请稍后重试。"
@@ -127,15 +129,17 @@ async def wolfram_calculate(query: str) -> str:
     if not app_id:
         return "计算服务未配置（缺少 WOLFRAM_APP_ID）"
     try:
-        async with httpx.AsyncClient(timeout=15) as client:
-            resp = await client.get(
-                "https://api.wolframalpha.com/v1/result",
-                params={"appid": app_id, "i": query},
-            )
-            if resp.status_code == 400:
-                return f"Wolfram Alpha 无法理解查询: {query}"
-            resp.raise_for_status()
-            return resp.text
+        # 复用共享 httpx 客户端（连接复用），timeout=15 为请求级超时
+        client = get_shared_async_client()
+        resp = await client.get(
+            "https://api.wolframalpha.com/v1/result",
+            params={"appid": app_id, "i": query},
+            timeout=15,
+        )
+        if resp.status_code == 400:
+            return f"Wolfram Alpha 无法理解查询: {query}"
+        resp.raise_for_status()
+        return resp.text
     except Exception as e:
         logger.error(f"Wolfram Alpha 计算失败: {e}")
         return f"计算失败：{e}。请稍后重试。"

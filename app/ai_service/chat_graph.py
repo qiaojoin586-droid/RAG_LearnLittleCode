@@ -56,8 +56,8 @@ async def classify_node(state: ChatState) -> dict:
             "source": "attachment",
             "reason": "仅附件消息，无文本可分类",
         }
-        logger.info("仅附件消息，跳过复杂度分类，直接走 ReAct 多模态路径")
-    logger.info(
+        logger.debug("仅附件消息，跳过复杂度分类，直接走 ReAct 多模态路径")
+    logger.debug(
         f"查询分类: complexity={result['complexity']}, "
         f"source={result['source']}, reason={result['reason']}"
     )
@@ -69,7 +69,7 @@ def route_after_classify(state: ChatState) -> str:
     classification = state["classification"]
     plan_available = state["ctx"].plan_model is not None
     route = decide_route(classification.get("complexity"), plan_available)
-    logger.info(
+    logger.debug(
         f"查询路由: complexity={classification.get('complexity')}, route={route}, "
         f"reason={classification.get('reason')}"
     )

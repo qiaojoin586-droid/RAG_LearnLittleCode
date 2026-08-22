@@ -76,7 +76,7 @@ class QueryClassifier:
         # 1. L1 规则预判
         result = self._rule_classify(user_message)
         if result.complexity != "uncertain":
-            logger.info(
+            logger.debug(
                 f"查询分类 [L1 规则]: complexity={result.complexity}, "
                 f"reason={result.reason}"
             )
@@ -86,7 +86,7 @@ class QueryClassifier:
         if self.llm_enabled and self.llm_model:
             try:
                 llm_result = await self._llm_classify(user_message)
-                logger.info(
+                logger.debug(
                     f"查询分类 [L2 LLM]: complexity={llm_result.complexity}, "
                     f"reason={llm_result.reason}, confidence={llm_result.confidence}"
                 )

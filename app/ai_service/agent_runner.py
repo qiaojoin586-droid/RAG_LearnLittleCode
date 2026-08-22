@@ -59,7 +59,7 @@ def resolve_tool_groups(user_message: str) -> List[str]:
                 logger.debug(f"工具路由匹配: 关键词 '{kw}' → 追加工具组 '{group_name}'")
                 break  # 命中一个即可，无需继续匹配同组
 
-    logger.info(f"工具路由结果: groups={selected} (message='{user_message[:50]}...')")
+    logger.debug(f"工具路由结果: groups={selected} (message='{user_message[:50]}...')")
 
     # 注：已移除原来的"消息>=15字符补 note_write"兜底。
     # default_groups 现为全量加载（含 note_write/review），
