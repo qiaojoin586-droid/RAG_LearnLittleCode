@@ -38,6 +38,10 @@ interface PlanProgressCardProps {
   defaultCollapsed?: boolean;
   /** 当前活跃工具名（全局级别，显示在正在执行的步骤下） */
   currentTool?: string;
+  /** 反思阶段（L1 综合后自检）：'' | 'checking' | 'refining' */
+  reflectStatus?: string;
+  /** 反思修正轮次 */
+  reflectRound?: number;
 }
 
 const statusIcons: Record<StepStatus, React.ReactNode> = {
@@ -62,6 +66,8 @@ export default function PlanProgressCard({
   isComplete = false,
   defaultCollapsed,
   currentTool,
+  reflectStatus,
+  reflectRound = 0,
 }: PlanProgressCardProps) {
   const [collapsed, setCollapsed] = useState(defaultCollapsed ?? isComplete);
   
@@ -136,6 +142,23 @@ export default function PlanProgressCard({
               </div>
             </div>
           ))}
+        </div>
+      )}
+
+      {/* 反思状态提示（L1 综合后自检 + L2 失败修复，AI对话Reflection反思机制设计方案.md §3.8） */}
+      {reflectStatus === 'checking' && (
+        <div className="mt-2 text-xs text-blue-500 dark:text-blue-400">
+          🔍 正在反思回答质量…
+        </div>
+      )}
+      {reflectStatus === 'repairing' && (
+        <div className="mt-2 text-xs text-amber-500 dark:text-amber-400">
+          🔧 执行遇到问题，正在自动修复重试…
+        </div>
+      )}
+      {reflectStatus === 'refining' && (
+        <div className="mt-2 text-xs text-amber-500 dark:text-amber-400">
+          🔄 正在修正回答{reflectRound > 0 ? `（第 ${reflectRound} 轮）` : ''}…
         </div>
       )}
 

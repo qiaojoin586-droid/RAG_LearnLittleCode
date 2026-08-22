@@ -25,12 +25,11 @@ from datetime import datetime
 from pathlib import Path
 from typing import Optional, List
 
-import httpx
-
 from langchain_core.tools import tool
 
 from app.ai_service.tool_registry import init_tool_registry, tool_registry
 from app.core.logger_handler import logger
+from app.utils.factory import get_shared_async_client
 
 
 # ============================================================
@@ -95,13 +94,16 @@ async def translate_text(text: str, target_lang: str, source_lang: str = "") -> 
     if source_lang:
         params["source_lang"] = source_lang.upper()
     try:
-        async with httpx.AsyncClient(timeout=15) as client:
-            resp = await client.post(
-                base_url, data=params,
-                headers={"Authorization": f"DeepL-Auth-Key {api_key}"},
-            )
-            resp.raise_for_status()
-            result = resp.json()
+        # 复用共享 httpx 客户端（TCP/TLS 连接复用），
+        # timeout=15 为请求级超时，覆盖共享客户端默认 120s
+        client = get_shared_async_client()
+        resp = await client.post(
+            base_url, data=params,
+            headers={"Authorization": f"DeepL-Auth-Key {api_key}"},
+            timeout=15,
+        )
+        resp.raise_for_status()
+        result = resp.json()
     except Exception as e:
         logger.error(f"DeepL 翻译失败: {e}")
         return f"翻译失败：{e}。请稍后重试。"
@@ -127,15 +129,17 @@ async def wolfram_calculate(query: str) -> str:
     if not app_id:
         return "计算服务未配置（缺少 WOLFRAM_APP_ID）"
     try:
-        async with httpx.AsyncClient(timeout=15) as client:
-            resp = await client.get(
-                "https://api.wolframalpha.com/v1/result",
-                params={"appid": app_id, "i": query},
-            )
-            if resp.status_code == 400:
-                return f"Wolfram Alpha 无法理解查询: {query}"
-            resp.raise_for_status()
-            return resp.text
+        # 复用共享 httpx 客户端（连接复用），timeout=15 为请求级超时
+        client = get_shared_async_client()
+        resp = await client.get(
+            "https://api.wolframalpha.com/v1/result",
+            params={"appid": app_id, "i": query},
+            timeout=15,
+        )
+        if resp.status_code == 400:
+            return f"Wolfram Alpha 无法理解查询: {query}"
+        resp.raise_for_status()
+        return resp.text
     except Exception as e:
         logger.error(f"Wolfram Alpha 计算失败: {e}")
         return f"计算失败：{e}。请稍后重试。"
@@ -277,21 +281,41 @@ def create_agent_tools(
         if not db_session_factory:
             return "数据库未初始化"
 
-        from sqlalchemy import select, func
+        from sqlalchemy import and_, func, select
         from app.models.note import Note
+        from app.models.category import NoteCategory
 
         async with db_session_factory() as db:
+            # 单次 LEFT JOIN 合并原两次查询（分类统计 + 未分类统计），语义与原实现一致：
+            # - category_id IS NULL → 归入"未分类"（COALESCE 兜底）
+            # - 分类已删但笔记未删 → 不计入任何统计（原实现内连接排除此类笔记，
+            #   未分类统计也只查 IS NULL；此处用 WHERE 显式排除保持同语义）
+            category_name = func.coalesce(NoteCategory.name, "未分类").label("category_name")
             result = await db.execute(
-                select(Note.category, func.count())
-                .where(Note.user_id == user_id, Note.deleted_at.is_(None))
-                .group_by(Note.category)
+                select(category_name, func.count().label("note_count"))
+                .select_from(Note)
+                .outerjoin(
+                    NoteCategory,
+                    and_(
+                        Note.category_id == NoteCategory.id,
+                        NoteCategory.deleted_at.is_(None),
+                    ),
+                )
+                .where(
+                    Note.user_id == user_id,
+                    Note.deleted_at.is_(None),
+                    (Note.category_id.is_(None)) | (NoteCategory.id.is_not(None)),
+                )
+                .group_by(NoteCategory.id, NoteCategory.name)
             )
-            stats = result.all()
+            stats = list(result.all())
 
             if not stats:
                 return "暂无笔记"
 
-            lines = [f"- {cat or '未分类'}: {count} 篇" for cat, count in stats]
+            # 未分类行固定排在最后（与原实现输出顺序一致）
+            rows = sorted(stats, key=lambda r: r[0] == "未分类")
+            lines = [f"- {name}: {count} 篇" for name, count in rows]
             return "笔记分类统计:\n" + "\n".join(lines)
 
     @tool
@@ -328,6 +352,31 @@ def create_agent_tools(
             await db.commit()
             return f"回顾完成！下次回顾时间: {review.next_review_at.strftime('%Y-%m-%d')}"
 
+    async def _resolve_category(db, category_name: str):
+        """
+        将分类名称解析为 (category_id, category_name)（透明 name→ID 适配，设计 §8.3）
+
+        未找到匹配分类时返回 (None, 原字符串)——降级写入 category 字符串，
+        笔记不丢失，后续可在分类树中看到（作为新分类或归入对应分类）。
+        """
+        if not category_name:
+            return None, None
+
+        from sqlalchemy import select
+        from app.models.category import NoteCategory
+
+        result = await db.execute(
+            select(NoteCategory).where(
+                NoteCategory.user_id == user_id,
+                NoteCategory.name == category_name,
+                NoteCategory.deleted_at.is_(None),
+            )
+        )
+        cat = result.scalar_one_or_none()
+        if cat:
+            return cat.id, cat.name
+        return None, category_name
+
     @tool
     async def create_note_tool(title: str, content: str, tags: str = "", category: str = "") -> str:
         """
@@ -347,9 +396,14 @@ def create_agent_tools(
         tag_list = [t.strip() for t in tags.split(",") if t.strip()] if tags else []
 
         async with db_session_factory() as db:
+            # 分类管理功能：name→ID 透明解析，双写两个字段（未匹配时降级保留字符串）
+            category_id, category_name = await _resolve_category(db, category)
             note = await note_service.create_note(
                 db, user_id,
-                NoteCreate(title=title, content=content, tags=tag_list, category=category)
+                NoteCreate(
+                    title=title, content=content, tags=tag_list,
+                    category=category_name, category_id=category_id,
+                )
             )
             await db.commit()
             return f"笔记创建成功！ID: {note.id}, 标题: {note.title}"
@@ -380,14 +434,18 @@ def create_agent_tools(
             update_data["content"] = content
         if tags is not None:
             update_data["tags"] = [t.strip() for t in tags.split(",") if t.strip()]
-        if category is not None:
-            update_data["category"] = category
 
-        if not update_data:
+        if not update_data and category is None:
             return "未提供任何要更新的字段"
 
         async with db_session_factory() as db:
             try:
+                # 分类管理功能：name→ID 透明解析，双写两个字段（未匹配时降级保留字符串）
+                if category is not None:
+                    category_id, category_name = await _resolve_category(db, category)
+                    update_data["category"] = category_name
+                    update_data["category_id"] = category_id
+
                 note = await note_service.update_note(
                     db, note_id, user_id, NoteUpdate(**update_data)
                 )
@@ -428,11 +486,12 @@ def create_agent_tools(
         发送邮件。这是唯一能真正把邮件发送出去的工具：当用户要求将笔记发送到邮箱时，必须调用本工具完成发送，
         不得仅用文字回复代替。支持以 Markdown 或 PDF 附件形式发送。
 
-        调用前请先通过 get_user_info_tools 获取用户邮箱；
-        若用户未绑定邮箱，请先询问用户要发送到的目标邮箱地址。
+        收件人确定规则：用户在对话中明确给出的目标邮箱地址优先（可以发送给任何人的邮箱）；
+        用户未给出地址时，先通过 get_user_info_tools 获取用户本人绑定邮箱作为收件人；
+        仍无邮箱则询问用户。无论哪种情况，发送前必须与用户确认收件人地址。
 
         Args:
-            to: 收件人邮箱地址（必须与用户确认过）
+            to: 收件人邮箱地址（用户明确给出的目标地址，或用户本人绑定邮箱；必须与用户确认过）
             subject: 邮件主题（如 "笔记导出：{笔记标题}"）
             body: 邮件正文（Markdown 格式，建议包含笔记标题、分类/标签元信息和完整内容）
             format: 附件格式："md"（Markdown 附件，默认）/ "pdf"（PDF 附件）/ "text"（仅正文，无附件）
@@ -485,7 +544,7 @@ def create_agent_tools(
             await email_service.send_email(to, subject, body, attachments=attachments)
             _email_send_record(user_id)  # 发送成功后计数（P2-3 限流）
             fmt_label = {"md": "Markdown", "pdf": "PDF", "text": "文本"}.get(format, "Markdown")
-            return f"笔记已成功以{fmt_label}形式发送至 {to}"
+            return f"笔记已成功以{fmt_label}形式发送至 {to}（若收件人长时间未收到，请让其检查垃圾邮件箱）"
         except Exception as e:
             # 捕获所有异常返回友好提示，防止 SMTP 异常冒泡导致 Agent 循环中断
             logger.error(f"邮件发送失败: to={to}, error={e}")

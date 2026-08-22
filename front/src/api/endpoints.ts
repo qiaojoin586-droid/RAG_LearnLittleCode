@@ -60,6 +60,30 @@ export const endpoints = {
     restore: (id: string) => `${API_PREFIX}/note/${id}/restore`,
     /** DELETE 彻底删除笔记 */
     permanent: (id: string) => `${API_PREFIX}/note/${id}/permanent`,
+    /** PUT 移动笔记到分类（category_id 为查询参数，不传 = 移为未分类） */
+    moveCategory: (id: string) => `${API_PREFIX}/note/${id}/category`,
+  },
+
+  // ========== 分类 ==========
+  category: {
+    /** GET 分类树 */
+    tree: `${API_PREFIX}/category/tree`,
+    /** POST 创建分类 */
+    base: `${API_PREFIX}/category`,
+    /** PUT 更新 / DELETE 软删除分类 */
+    detail: (id: string) => `${API_PREFIX}/category/${id}`,
+    /** POST 移动分类（改父级） */
+    move: (id: string) => `${API_PREFIX}/category/${id}/move`,
+    /** POST 从回收站恢复分类 */
+    restore: (id: string) => `${API_PREFIX}/category/${id}/restore`,
+    /** DELETE 彻底删除分类（回收站，物理删除不可恢复） */
+    permanent: (id: string) => `${API_PREFIX}/category/${id}/permanent`,
+    /** POST 批量重排同级分类顺序 */
+    reorder: `${API_PREFIX}/category/reorder`,
+    /** POST 批量操作（删除/合并） */
+    batch: `${API_PREFIX}/category/batch`,
+    /** GET 回收站分类列表 */
+    recycleBin: `${API_PREFIX}/category/recycle-bin`,
   },
 
   // ========== 聊天 ==========

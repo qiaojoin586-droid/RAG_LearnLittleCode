@@ -176,7 +176,7 @@ export default function KnowledgeBase() {
   };
 
   return (
-    <div>
+    <div className="p-6">
       <h1 className="text-2xl font-heading font-bold text-[var(--color-text)] mb-6">
         {t('nav.knowledge')}
       </h1>

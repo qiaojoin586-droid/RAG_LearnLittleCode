@@ -99,6 +99,10 @@ async def register(data: UserRegister, db: AsyncSession = Depends(get_db)):
     db.add(user)
     await db.flush()
 
+    # 为新用户创建模板分类树（与存量数据迁移共用模板，见 category_service.TEMPLATE_TREE）
+    from app.services.category_service import seed_template_tree
+    await seed_template_tree(db, user.uuid)
+
     logger.info(f"用户注册成功: username={data.username}, id={user.uuid}, email_verified=True")
 
     return success_response(data={"user_id": user.uuid, "username": user.username})

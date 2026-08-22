@@ -16,21 +16,21 @@ import uuid
 
 from typing import List, Optional, Tuple
 
-from sqlalchemy import select, update, func, and_, or_
+from sqlalchemy import select, update, func, and_, or_, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.logger_handler import logger
 from app.core.failed_response import BusinessError, ErrorCode
 from app.core.task_runner import spawn_background_task
 from app.models.note import Note
+from app.models.category import NoteCategory
 from app.models.review import ReviewRecord
 from app.schemas.note import NoteCreate, NoteUpdate
 
 
-# 笔记标准分类（与前端 front/src/constants/noteCategories.ts 保持一致）
-STANDARD_NOTE_CATEGORIES = ("工作", "学习", "生活", "技术")
-# 兜底分类：分类非空且不属于标准分类时归入"其他"
-OTHER_CATEGORY = "其他"
+# "未分类"过滤哨兵值（与前端保持一致）：
+# GET /note?category_id=__uncategorized__ → WHERE category_id IS NULL
+UNCATEGORIZED_SENTINEL = "__uncategorized__"
 
 
 class NoteService:
@@ -81,7 +81,15 @@ class NoteService:
             tags=note_data.tags or [],
             category=note_data.category,
             is_pinned=note_data.is_pinned,
+            # 文档类型（md/txt）：仅新建时写入；AI 工具不传时默认 'md'
+            format=note_data.format or 'md',
         )
+
+        # 双写：category_id 优先，同时将 category 字符串同步为分类名
+        if note_data.category_id:
+            cat = await self._resolve_category_by_id(db, user_id, note_data.category_id)
+            note.category_id = cat.id
+            note.category = cat.name
         
         db.add(note)
         await db.flush()
@@ -170,18 +178,20 @@ class NoteService:
     async def list_notes(
         self, db: AsyncSession, user_id: str,
         page: int = 1, page_size: int = 20,
-        category: Optional[str] = None
+        category: Optional[str] = None,
+        category_id: Optional[str] = None,
     ) -> Tuple[List[Note], int]:
         """
         分页获取笔记列表
-        
+
         Args:
             db: 数据库会话
             user_id: 用户 ID
             page: 页码
             page_size: 每页数量
-            category: 按分类过滤（可选）
-            
+            category: 按分类字符串过滤（可选，双写期间向后兼容）
+            category_id: 按分类 ID 过滤（可选，优先；哨兵值 __uncategorized__ = 未分类）
+
         Returns:
             (笔记列表, 总数)
         """
@@ -192,17 +202,19 @@ class NoteService:
         count_query = select(func.count()).select_from(Note).where(
             and_(Note.user_id == user_id, Note.deleted_at.is_(None))
         )
-        
-        if category:
-            if category == OTHER_CATEGORY:
-                # "其他"兜底分类：分类非空且不属于标准分类（含历史任意分类值）。
-                # not_in 对 NULL 不匹配 → 排除"未分类"；列表中加入空串 → 排除空分类旧数据
-                excluded = STANDARD_NOTE_CATEGORIES + ("",)
-                query = query.where(Note.category.not_in(excluded))
-                count_query = count_query.where(Note.category.not_in(excluded))
+
+        if category_id:
+            if category_id == UNCATEGORIZED_SENTINEL:
+                # "未分类"哨兵值 → category_id IS NULL
+                query = query.where(Note.category_id.is_(None))
+                count_query = count_query.where(Note.category_id.is_(None))
             else:
-                query = query.where(Note.category == category)
-                count_query = count_query.where(Note.category == category)
+                query = query.where(Note.category_id == category_id)
+                count_query = count_query.where(Note.category_id == category_id)
+        elif category:
+            # 降级到字符串过滤（向后兼容；原"其他" not_in 兜底逻辑已随迁移移除）
+            query = query.where(Note.category == category)
+            count_query = count_query.where(Note.category == category)
         
         # 排序：置顶优先，然后按更新时间倒序
         query = query.order_by(Note.is_pinned.desc(), Note.updated_at.desc())
@@ -236,9 +248,19 @@ class NoteService:
             更新后的笔记对象
         """
         note = await self.get_note(db, note_id, user_id)
-        
+
         # 更新字段
         update_data = note_data.model_dump(exclude_unset=True)
+        if "category_id" in update_data:
+            # 双写：category_id 优先；显式传 None 表示移为未分类，同步清空字符串
+            if update_data["category_id"]:
+                cat = await self._resolve_category_by_id(db, user_id, update_data["category_id"])
+                update_data["category_id"] = cat.id
+                update_data["category"] = cat.name
+            elif "category" not in update_data:
+                # 显式 None 且未同时提供字符串 → 清空两字段；
+                # 若同时提供了字符串（AI 工具未匹配分类的降级场景），保留字符串
+                update_data["category"] = None
         for field, value in update_data.items():
             setattr(note, field, value)
         
@@ -532,6 +554,53 @@ class NoteService:
         logger.info(f"笔记移动分类: note_id={note_id}, category={category}")
         return note
 
+    async def _resolve_category_by_id(
+        self, db: AsyncSession, user_id: str, category_id: str
+    ) -> NoteCategory:
+        """按 ID 解析分类（归属校验 + 排除软删除，未找到抛 404）"""
+        result = await db.execute(
+            select(NoteCategory).where(
+                NoteCategory.id == category_id,
+                NoteCategory.user_id == user_id,
+                NoteCategory.deleted_at.is_(None),
+            )
+        )
+        cat = result.scalar_one_or_none()
+        if not cat:
+            raise BusinessError(code=ErrorCode.CATEGORY_NOT_FOUND, http_status=404)
+        return cat
+
+    async def move_note_by_id(
+        self, db: AsyncSession, note_id: str, user_id: str, category_id: Optional[str]
+    ) -> Note:
+        """
+        按分类 ID 移动笔记（双写：category 字符串同步更新）
+
+        Args:
+            db: 数据库会话
+            note_id: 笔记 ID
+            user_id: 用户 ID
+            category_id: 目标分类 ID；None 表示移为"未分类"（双字段同步清空）
+
+        Returns:
+            更新后的笔记对象
+        """
+        note = await self.get_note(db, note_id, user_id)
+
+        if category_id:
+            cat = await self._resolve_category_by_id(db, user_id, category_id)
+            note.category_id = cat.id
+            note.category = cat.name
+        else:
+            note.category_id = None
+            note.category = None
+
+        note.updated_at = func.now()
+        await db.flush()
+        await db.refresh(note)  # 回读 updated_at（func.now() 为 SQL 表达式，见 update_note 注释）
+        logger.info(f"笔记移动分类: note_id={note_id}, category_id={category_id}")
+        return note
+
     async def semantic_search(
         self, db: AsyncSession, user_id: str, query: str, top_k: int = 5
     ) -> List[Tuple[Note, float]]:
@@ -587,9 +656,119 @@ class NoteService:
             for note in notes
         ]
         sorted_results.sort(key=lambda x: x[1], reverse=True)
-        
+
         return sorted_results
-    
+
+    async def keyword_search(
+        self, db: AsyncSession, user_id: str, query: str, top_k: int = 5
+    ) -> List[Tuple[Note, float]]:
+        """
+        关键词搜索笔记（MySQL FULLTEXT 优先 + LIKE 兜底，不依赖外部 Embedding 服务）
+
+        策略：
+        1. 关键词 ≥2 字符 → MATCH AGAINST（ngram 双字分词，相关度 + 更新时间排序）
+        2. 单字符 / FULLTEXT 无命中 / 索引缺失等异常 → LIKE 字面匹配兜底
+        score 仅作排序权重（标题命中 1.0 > 正文命中 0.5；FULLTEXT 相关度命中 0.9），
+        非语义相似度。语义搜索（semantic_search）仍保留给 AI 对话的 search_notes_tool 使用。
+
+        Args:
+            db: 数据库会话
+            user_id: 用户 ID
+            query: 搜索关键词
+            top_k: 返回结果数量
+
+        Returns:
+            [(Note, score), ...] 按权重降序排列
+        """
+        keyword = (query or "").strip()
+        if not keyword:
+            return []
+
+        # ngram 分词最小 token 为 2 字符：单字符关键词直接走 LIKE
+        if len(keyword) < 2:
+            return await self._like_search(db, user_id, keyword, top_k)
+
+        # FULLTEXT 优先：MATCH AGAINST 自然语言模式（ngram 支持中文/英文子串）
+        # 注意：SQLAlchemy 的 func.match().against() 不是合法构造（Function 无 against），
+        # 用 text() 绑定参数实现（表名固定为 notes；关键词经 execute 参数绑定，防注入）
+        try:
+            match_where = text(
+                "MATCH (notes.title, notes.content) AGAINST (:kw IN NATURAL LANGUAGE MODE)"
+            )
+            match_order = text(
+                "MATCH (notes.title, notes.content) AGAINST (:kw IN NATURAL LANGUAGE MODE) DESC"
+            )
+            result = await db.execute(
+                select(Note)
+                .where(
+                    and_(
+                        Note.user_id == user_id,
+                        Note.deleted_at.is_(None),
+                        match_where,
+                    )
+                )
+                .order_by(match_order, Note.updated_at.desc())
+                .limit(top_k),
+                {"kw": keyword},
+            )
+            notes = list(result.scalars().all())
+            if notes:
+                return [(n, 0.9) for n in notes]
+        except Exception as e:
+            # FULLTEXT 索引缺失/方言不支持等异常 → LIKE 兜底，保证搜索始终可用
+            logger.warning(f"FULLTEXT 查询失败，回退 LIKE: {type(e).__name__}: {e}")
+
+        # LIKE 兜底：FULLTEXT 无命中（符号/罕见词）时保证字面匹配
+        return await self._like_search(db, user_id, keyword, top_k)
+
+    async def _like_search(
+        self, db: AsyncSession, user_id: str, keyword: str, top_k: int
+    ) -> List[Tuple[Note, float]]:
+        """
+        LIKE 字面匹配兜底（标题命中优先于正文命中，同类内按更新时间倒序）
+        """
+        # 转义 LIKE 通配符（% 与 _ 按字面匹配）
+        escaped = (
+            keyword.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+        )
+        pattern = f"%{escaped}%"
+
+        # 1) 标题命中（优先级高）
+        title_result = await db.execute(
+            select(Note)
+            .where(
+                and_(
+                    Note.user_id == user_id,
+                    Note.deleted_at.is_(None),
+                    Note.title.like(pattern, escape="\\"),
+                )
+            )
+            .order_by(Note.updated_at.desc())
+            .limit(top_k)
+        )
+        title_notes = list(title_result.scalars().all())
+        results: List[Tuple[Note, float]] = [(n, 1.0) for n in title_notes]
+
+        # 2) 正文命中补齐（排除已命中的标题笔记）
+        remaining = top_k - len(title_notes)
+        if remaining > 0:
+            conds = [
+                Note.user_id == user_id,
+                Note.deleted_at.is_(None),
+                Note.content.like(pattern, escape="\\"),
+            ]
+            if title_notes:
+                conds.append(Note.id.not_in([n.id for n in title_notes]))
+            content_result = await db.execute(
+                select(Note)
+                .where(and_(*conds))
+                .order_by(Note.updated_at.desc())
+                .limit(remaining)
+            )
+            results.extend((n, 0.5) for n in content_result.scalars().all())
+
+        return results
+
     async def _sync_to_vector(self, note: Note) -> None:
         """
         异步同步笔记到 ChromaDB 向量库（notes_collection）

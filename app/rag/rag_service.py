@@ -10,9 +10,22 @@ RAG 核心服务
 """
 
 import asyncio
+import concurrent.futures
+import hashlib
 from typing import Any, Callable, Dict, List, Optional
 
 from app.core.logger_handler import logger
+
+# 重排序专用线程池：CrossEncoder 无原生异步，需 run_in_executor。
+# 使用独立小线程池（而非默认线程池），避免与 LLM 等任务竞争线程，
+# 且重排序是 CPU 密集计算，2 个 worker 即可。
+_rerank_pool = concurrent.futures.ThreadPoolExecutor(
+    max_workers=2, thread_name_prefix="rerank"
+)
+
+# HyDE 响应缓存 TTL（秒）
+_HYDE_CACHE_TTL = 3600
+
 
 
 class RagService:
@@ -81,7 +94,7 @@ class RagService:
         hyde_text = query_text
         if use_hyde and self.chat_model:
             await self._notify(thinking_callback, "hyde", "生成假设性回答...")
-            hyde_text = await self._generate_hyde(query_text)
+            hyde_text = await self._generate_hyde(query_text, user_id)
             logger.debug(f"HyDE 生成: {hyde_text[:100]}...")
         
         # 阶段 3: 双源检索
@@ -136,38 +149,72 @@ class RagService:
             "route_score": 0.0,
         }
     
-    async def _generate_hyde(self, query: str) -> str:
+    async def _generate_hyde(self, query: str, user_id: str = "") -> str:
         """
         HyDE: 让 LLM 生成假设性回答
-        
+
         用假设性回答去向量库检索，比直接用问题检索更准确。
-        
+        相同用户 + 相同查询命中 Redis 缓存时跳过 LLM 调用。
+
         Args:
             query: 用户原始查询
-            
+            user_id: 用户 ID（进入缓存键，避免跨用户命中）
+
         Returns:
             假设性回答文本
         """
         try:
+            # 先查 Redis 缓存（缓存异常静默降级，不影响主流程）
+            cache_key = self._hyde_cache_key(query, user_id)
+            cached = await self._get_hyde_cache(cache_key)
+            if cached:
+                logger.debug(f"HyDE 命中缓存: {cache_key}")
+                return cached
+
             prompt = (
                 "请根据以下问题，生成一个假设性的回答（不需要完全准确，"
                 "用于帮助检索相关文档）：\n\n"
                 f"问题：{query}\n\n"
                 "假设性回答："
             )
-            
-            import asyncio
-            loop = asyncio.get_event_loop()
-            response = await loop.run_in_executor(
-                None,
-                lambda: self.chat_model.invoke(prompt)
-            )
-            
-            return response.content if hasattr(response, 'content') else str(response)
-            
+
+            # ainvoke 走 ChatOpenAI 的共享异步 http 客户端（连接复用），
+            # 同时避免 run_in_executor 的线程切换开销
+            response = await self.chat_model.ainvoke(prompt)
+            result = response.content if hasattr(response, 'content') else str(response)
+
+            # 仅缓存成功结果（LLM 失败回退原文不入缓存）
+            if result and result.strip():
+                await self._set_hyde_cache(cache_key, result)
+
+            return result
+
         except Exception as e:
             logger.warning(f"HyDE 生成失败，使用原始查询: {e}")
             return query
+
+    def _hyde_cache_key(self, query: str, user_id: str) -> str:
+        """生成 HyDE 缓存键（含模型名，防止切换模型后命中旧缓存）"""
+        model_name = getattr(self.chat_model, "model_name", "unknown")
+        query_hash = hashlib.md5(query.encode("utf-8")).hexdigest()[:16]
+        return f"hyde:v1:{model_name}:{user_id}:{query_hash}"
+
+    async def _get_hyde_cache(self, key: str) -> Optional[str]:
+        """读取 HyDE 缓存；Redis 异常时静默降级返回 None"""
+        try:
+            from app.db.redis_client import get_redis
+            cached = await get_redis().get(key)
+            return cached or None
+        except Exception:
+            return None
+
+    async def _set_hyde_cache(self, key: str, value: str) -> None:
+        """写入 HyDE 缓存；Redis 异常时静默忽略"""
+        try:
+            from app.db.redis_client import get_redis
+            await get_redis().set(key, value, ex=_HYDE_CACHE_TTL)
+        except Exception:
+            pass
     
     async def _rerank(self, query: str, documents: List[dict], top_k: int) -> List[dict]:
         """
@@ -187,11 +234,11 @@ class RagService:
         try:
             # 构建 (query, document) 对
             pairs = [(query, doc["content"]) for doc in documents]
-            
-            import asyncio
+
+            # CrossEncoder 无原生异步，使用专用线程池避免与默认线程池竞争
             loop = asyncio.get_event_loop()
             scores = await loop.run_in_executor(
-                None,
+                _rerank_pool,
                 lambda: self.rerank_model.compute_score(pairs)
             )
             
@@ -260,13 +307,9 @@ class RagService:
                 f"相关总结："
             )
             
-            import asyncio
-            loop = asyncio.get_event_loop()
-            response = await loop.run_in_executor(
-                None,
-                lambda: self.chat_model.invoke(prompt)
-            )
-            
+            # ainvoke 走共享异步 http 客户端（连接复用），减少线程切换开销
+            response = await self.chat_model.ainvoke(prompt)
+
             return response.content if hasattr(response, 'content') else str(response)
             
         except Exception as e:

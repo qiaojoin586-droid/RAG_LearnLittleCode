@@ -37,6 +37,7 @@ from app.utils.file_handler import (
 CHAT_FILE_ROOT = os.getenv("CHAT_FILE_ROOT", os.path.join("data", "chat_files"))
 
 
+
 class ChatAttachmentService:
     """聊天附件服务"""
 

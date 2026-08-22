@@ -154,11 +154,23 @@ def get_plan_execute_config() -> dict:
 def get_classifier_config() -> dict:
     """
     获取查询分类器配置
-    
+
     Returns:
         agent.yaml 中的 classifier 配置字典
     """
     return load_yaml("agent.yaml").get("classifier", {})
+
+
+def get_reflection_config() -> dict:
+    """
+    获取 Reflection 反思机制配置（L1 综合后自检）
+
+    Returns:
+        agent.yaml 中的 reflection 配置字典
+        例: {"enable": true, "critic_model": "light", "critic_timeout": 15,
+             "max_refine_rounds": 1, "trigger": {"min_answer_chars": 500}}
+    """
+    return load_yaml("agent.yaml").get("reflection", {})
 
 
 def get_tool_groups_config() -> dict:

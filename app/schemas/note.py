@@ -16,7 +16,12 @@ class NoteCreate(BaseModel):
     content: str = Field(..., min_length=1, description="笔记内容（Markdown）")
     tags: Optional[List[str]] = Field(None, description="标签列表")
     category: Optional[str] = Field(None, max_length=100, description="分类")
+    category_id: Optional[str] = Field(None, max_length=36, description="分类 ID（双写期间与 category 并行，优先使用）")
     is_pinned: bool = Field(False, description="是否置顶")
+    # 文档类型：md = Markdown（默认）/ txt = 纯文本；仅新建时写入
+    format: Optional[str] = Field(
+        'md', pattern='^(md|txt)$', description="文档类型"
+    )
 
 
 class NoteUpdate(BaseModel):
@@ -25,6 +30,7 @@ class NoteUpdate(BaseModel):
     content: Optional[str] = Field(None, min_length=1, description="笔记内容")
     tags: Optional[List[str]] = Field(None, description="标签列表")
     category: Optional[str] = Field(None, max_length=100, description="分类")
+    category_id: Optional[str] = Field(None, max_length=36, description="分类 ID（显式传 None 表示移为未分类）")
     is_pinned: Optional[bool] = Field(None, description="是否置顶")
 
 
@@ -36,7 +42,9 @@ class NoteResponse(BaseModel):
     content: str
     tags: Optional[List[str]] = None
     category: Optional[str] = None
+    category_id: Optional[str] = None  # 分类 ID（双写期间与 category 并行返回）
     is_pinned: bool
+    format: str = 'md'  # 文档类型（md/txt；旧数据兼容默认 md）
     created_at: datetime
     updated_at: datetime
     deleted_at: Optional[datetime] = None   # 删除时间（回收站展示用，正常笔记为 None）
@@ -101,13 +109,14 @@ class BatchOperation(BaseModel):
     operation: Literal['delete', 'pin', 'unpin', 'move', 'permanent_delete', 'restore'] = Field(
         ..., description="操作类型"
     )
-    target_category: Optional[str] = Field(None, description="目标分类（move 操作时使用）")
+    target_category: Optional[str] = Field(None, description="目标分类字符串（move 操作时使用，旧逻辑向后兼容）")
+    target_category_id: Optional[str] = Field(None, description="目标分类 ID（move 操作时使用，优先）")
 
     @model_validator(mode='after')
     def validate_move_category(self):
-        """move 操作必须提供 target_category"""
-        if self.operation == 'move' and not self.target_category:
-            raise ValueError("move 操作必须提供 target_category")
+        """move 操作必须提供 target_category 或 target_category_id"""
+        if self.operation == 'move' and not self.target_category and not self.target_category_id:
+            raise ValueError("move 操作必须提供 target_category 或 target_category_id")
         return self
 
     @model_validator(mode='after')

@@ -20,8 +20,8 @@ interface SessionState {
   /** 是否正在加载消息 */
   isLoadingMessages: boolean;
 
-  /** 设置会话列表 */
-  setSessions: (sessions: ChatSession[]) => void;
+  /** 设置会话列表（支持函数式更新，v2：浮层历史视图增删改用） */
+  setSessions: (sessions: ChatSession[] | ((prev: ChatSession[]) => ChatSession[])) => void;
   /** 设置当前会话 */
   setCurrentSession: (sessionId: string | null) => void;
   /** 记录最近会话 ID */
@@ -47,7 +47,13 @@ export const useSessionStore = create<SessionState>()((set) => ({
   messages: [],
   isLoadingMessages: false,
 
-  setSessions: (sessions) => set({ sessions }),
+  setSessions: (sessions) =>
+    set((state) => ({
+      sessions:
+        typeof sessions === 'function'
+          ? (sessions as (prev: ChatSession[]) => ChatSession[])(state.sessions)
+          : sessions,
+    })),
 
   setCurrentSession: (sessionId) => set({ currentSessionId: sessionId }),
 

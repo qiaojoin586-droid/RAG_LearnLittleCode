@@ -27,23 +27,18 @@
 
 ---
 
+<div align="center">
+<img src="docs/AiCharacter.png" alt="AiCharacter" width="800"/>
+</div>
+
+
 ## 🖼️ 界面预览
 
-<!-- ================================================================
-     截图区（预留空间，请手动补充）
-     👉 将运行截图放入 docs/screenshots/ 目录，然后复制下面的 <img>
-        标签替换对应的占位单元格即可。
-     示例：
-     <img src="docs/screenshots/chat.png" alt="AI 对话" width="48%"/>
-     <img src="docs/screenshots/notes.png" alt="笔记管理" width="48%"/>
-     <img src="docs/screenshots/login.png" alt="登录注册" width="48%"/>
-     <img src="docs/screenshots/plan.png" alt="Plan-and-Execute" width="48%"/>
-================================================================= -->
 
 <div align="center">
 <table>
   <tr>
-    <td width="50%" align="center"><b>🗨️ AI 对话</b><br/><img src="docs/SDSK.png" alt="AI 对话" width="100%"/></td>
+    <td width="50%" align="center"><b>🗨️ AI 对话</b><br/><img src="docs/AiChat.png" alt="AI 对话" width="100%"/></td>
     <td width="50%" align="center"><b>🧠 深度思考 / 多模态</b><br/><img src="docs/DMT.png" alt="深度思考 / 多模态" width="100%"/></td>
   </tr>
   <tr>
@@ -59,7 +54,7 @@
 
 | 模块 | 能力 |
 | :--- | :--- |
-| 🤖 **双 Agent 架构** | **ReAct**（逐步推理 + 工具调用）与 **Plan-and-Execute**（L1 规则 + L2 LLM 分类器混合路由） |
+| 🤖 **Agent 架构** | **ReAct**（逐步推理 + 工具调用）与 **Plan-and-Execute + Reflection反思机制**（L1 规则 + L2 LLM 分类器混合路由） |
 | 🧠 **深度思考** | 前端开关控制主模型思考模式（质量与延迟可权衡）；附件场景自动关闭（视觉模型理解附件）；Plan / 分类器由环境变量独立控制 |
 | 🖼️ **多模态理解** | 图片 / 视频附件上传（视频抽帧），视觉模型解答 |
 | 📚 **RAG 知识库** | ChromaDB 向量检索 + BM25 混合召回 + bge-reranker 重排序 + LLM 摘要 |
@@ -68,12 +63,15 @@
 | 🗣️ **语音合成** | Edge TTS 朗读（MP3，按用户目录隔离），对话中直接"朗读 / 读给我听"触发 |
 | 📊 **PPT 生成** | 关键词触发的讲解 PPT 生成（python-pptx 本地渲染，无额外额度）+ PPT 模板管理 +可切换Aspose.Slides Cloud API|
 | 🌍 **外部 API 工具** | DeepL 高质量翻译 · Wolfram Alpha 精确计算 / 解方程 / 单位换算 |
-| 📓 **笔记系统** | 富文本编辑（TipTap）、模板、AI 自动补全 / 打标签 |
-| 🗑️ **回收站** | 笔记删除进入回收站，14 天自动彻底清除（定时任务） |
+| 📓 **笔记系统** | Markdown 编辑器（双栏编辑预览 + 语法工具栏）+ **MD / TXT 文档类型**（新建可选，仅新建时可定）+ 笔记模板 + AI 自动补全 / 打标签 |
+| 🗂️ **分类管理** | 动态分类树（最多 3 级）：拖拽排序 / 移动 / 合并 / 软删除与回收站恢复（级联恢复祖先链），笔记按分类精确过滤 |
+| 🔍 **全局搜索** | 顶栏 Cmd/Ctrl+K 跨笔记 / 会话 / 知识库检索；笔记走 **MySQL 关键词搜索（FULLTEXT ngram 索引 + LIKE 兜底）**，零外部依赖 |
+| 💬 **对话卡片化** | AI 回复中的笔记搜索列表与用户引用的笔记均渲染为可点击卡片（悬浮反馈 + 全文预览弹窗） |
+| 🗑️ **回收站** | 笔记 / 分类双 Tab 回收站，14 天自动彻底清除（定时任务），单条与批量恢复 / 彻底删除 |
 | ✉️ **邮件功能** | QQ 邮箱注册验证，笔记以 Markdown / PDF 导出发送 |
 | 🗜️ **记忆压缩** | 滑动窗口 + 里程碑摘要 + Redis 热缓存的三级对话记忆管理，长对话不丢上下文 |
 | 💰 **Token 用量追踪** | model_trace 输出总线（log / db / langfuse），成本账单 API（前端用量面板开发中） |
-| 🌐 **前端体验** | React 19 + Vite + Tailwind，i18n 国际化，暗 / 亮主题 |
+| 🌐 **前端体验** | React 19 + Vite + Tailwind，i18n 国际化，暗 / 亮主题；**三栏式布局**（TopBar + 图标导航 + 分类树 / 列表 / 详情同屏）+ **AI 对话浮层**（480px 右侧滑入，唯一对话入口） |
 | ✅ **黄金评测器** | tests/eval 自动化评测 AI 对话质量（含安全用例） |
 
 ---
@@ -93,7 +91,7 @@
 - **后端**：FastAPI + SQLAlchemy(async) + MySQL + Redis（会话缓存 / 流式缓冲）
 - **Agent 编排**：LangChain / LangGraph，ReAct 与 Plan-and-Execute 双模式；ToolRegistry 统一管理 9 组内置工具 + MCP 动态工具，关键词路由按需加载
 - **记忆**：滑动窗口 + 里程碑摘要 + Redis 热缓存的三级压缩
-- **检索**：ChromaDB 向量库 + BM25 + CrossEncoder 重排序（BAAI/bge-reranker-v2-m3）
+- **检索**：ChromaDB 向量库 + BM25 + CrossEncoder 重排序（BAAI/bge-reranker-v2-m3，AI 对话语义检索）；顶栏全局搜索走 **MySQL FULLTEXT（ngram 分词）+ LIKE 兜底**（启动时自动校验 Embedding 维度一致性）
 - **模型层**：DashScope（百炼）⇄ Ollama（本地）一键切换；Chat / Thinking / Embedding / Vision / Classifier / Plan 多模型组合
 - **基础设施**：APScheduler 定时任务（回收站清理、孤儿附件清理）、Langfuse 可观测性
 
@@ -212,7 +210,7 @@ npm run dev
 
 > 💡 首次运行提示：
 > - **重排序模型首次下载**：`BAAI/bge-reranker-v2-m3`（约 1GB）需从 HuggingFace 下载。首次部署请临时设置 `HF_HUB_OFFLINE=0`，下载完成后可恢复离线模式
-> - 切换 Embedding 提供商后需**删除并重建 ChromaDB 向量库**（`data/chroma/`）；切换模型提供商后需重启服务
+> - 切换 Embedding 模型后需**重建 ChromaDB 向量库**：运行 `python scripts/manual/migrate_embeddings_2560.py`（无损重嵌：读出原文 → 重建集合 → 重新嵌入）；服务启动时会自动检查向量库与 Embedding 模型维度是否一致，不一致会给出明确修复指引
 > - 生产环境：`APP_ENV=production`、`JWT_SECRET` 必须为强随机值（启动强校验，公开默认值会拒绝启动）、`LOG_LEVEL=INFO`、`LOG_FORMAT=json`、`CORS_ORIGINS` 配置前端域名白名单（使用 `*` 时自动关闭凭据跨域）
 
 ---
@@ -389,11 +387,8 @@ npm run build     # tsc --noEmit + vite build（tsconfig 已开启 strict）
 ---
 
 ## 📚 文档
-
+- 待添加
 - [系统架构图](docs/System_Architecture_Diagram.png)
-- [AI 对话栏文件上传功能设计方案](docs/AI对话栏文件上传功能设计方案.md)
-- [邮箱验证与笔记回收站功能设计方案](docs/邮箱验证与笔记回收站功能设计方案.md)
-- [更多升级设计方案](docs/)
 
 ---
 

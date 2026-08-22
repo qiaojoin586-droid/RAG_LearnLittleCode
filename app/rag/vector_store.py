@@ -114,15 +114,54 @@ class VectorStoreService:
             self._notes_collection = self._chroma_client.get_or_create_collection(
                 name=notes_name, metadata={"hnsw:space": "cosine"}
             )
-            
+
             logger.info(
                 f"ChromaDB 初始化完成: rag={rag_name}({self._rag_collection.count()}条), "
                 f"notes={notes_name}({self._notes_collection.count()}条)"
             )
-            
+
+            # 维度漂移防护（2026-08-22）：集合维度与当前 embedding 模型输出不一致时
+            # 直接给出可执行的明确错误，替代运行期晦涩的 InvalidArgumentError
+            self._check_embedding_dimension()
+
         except Exception as e:
             logger.error(f"ChromaDB 初始化失败: {e}")
             raise
+
+    def _check_embedding_dimension(self) -> None:
+        """
+        维度一致性检查（防 embedding 模型更换导致向量库维度漂移）
+
+        - 非空集合取首条向量的实际维度，与当前 embed_model 的输出维度比对
+        - 空集合跳过（首次写入时自然定维）
+        - 不一致时抛 RuntimeError，提示运行迁移脚本或恢复原模型配置
+        """
+        if self.embed_model is None:
+            return
+
+        for name, col in (("rag", self._rag_collection), ("notes", self._notes_collection)):
+            if col.count() == 0:
+                continue
+            peek = col.peek(1)
+            stored = peek.get("embeddings")
+            if stored is None or len(stored) == 0:
+                continue
+            stored_dim = stored[0].shape[0] if hasattr(stored[0], "shape") else len(stored[0])
+
+            probe = self.embed_model.embed_documents(["__embedding_dim_probe__"])
+            if not probe:
+                continue
+            model_dim = len(probe[0])
+            model_name = getattr(self.embed_model, "model", "未知模型")
+
+            if model_dim != stored_dim:
+                raise RuntimeError(
+                    f"向量库维度不匹配：集合 {name} 为 {stored_dim} 维，"
+                    f"当前 embedding 模型 {model_name} 输出 {model_dim} 维。"
+                    f"请运行 python scripts/manual/migrate_embeddings_2560.py 迁移向量库，"
+                    f"或将 DASHSCOPE_EMBED_MODEL 恢复为建库时的模型。"
+                )
+            logger.info(f"Embedding 维度一致性检查通过: {name}={stored_dim} 维")
     
     async def upsert_document(
         self,

@@ -23,6 +23,8 @@
 
     {"id": "complex-001", "category": "complex", "query": "请先计算 23×47 的结果，然后把这个数字加上 100，最后告诉我最终结果是多少？只回答最终数字", "expected_keywords": ["1181"], "note": "多步骤（Plan-Execute）"},
     {"id": "complex-002", "category": "complex", "query": "我想比较一下量子计算和经典计算的区别，请从原理、速度、应用三个维度分析，最后给出总结", "expected_keywords": ["量子", "总结", "原理"], "note": "结构化分析（Plan-Execute）"},
+    {"id": "complex-003", "category": "complex", "query": "请分别搜索我笔记中关于Python和Java的内容，分别总结每篇笔记的核心内容，最后综合分析两种语言的学习优先级", "expected_keywords": ["Python", "Java", "学习"], "note": "Reflection 易跑偏用例（反思去重维度：多子项搜索各步骤易重复输出，L1 应消除重复）"},
+    {"id": "complex-004", "category": "complex", "query": "请统计我的笔记分类分布，然后分析我最近的学习重点变化趋势，最后总结并给出学习建议", "expected_keywords": ["统计", "笔记", "建议"], "note": "Reflection 易跑偏用例（反思诚实呈现维度：统计无结果时易编造，L1 应纠正）"},
 
     {"id": "note-001", "category": "note", "query": "帮我创建一篇笔记，标题是 EVAL_测试笔记，内容写：这是评测脚本创建的测试笔记", "expected_keywords": ["创建", "成功", "EVAL_测试笔记"], "note": "笔记创建工具"},
     {"id": "note-002", "category": "note", "query": "EVAL_城市笔记 里记录了什么内容？请简要回答", "expected_keywords": ["北京", "城市"], "note": "笔记检索（依赖前置笔记）"},

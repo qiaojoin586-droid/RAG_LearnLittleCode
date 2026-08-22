@@ -9,7 +9,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { FileText, Search, X } from 'lucide-react';
 import { notesApi } from '../../api/notes';
-import { normalizeCategory } from '../../constants/noteCategories';
+import { useFlipAlignment } from '../../hooks/useFlipAlignment';
 import type { Note } from '../../types/api';
 
 interface Props {
@@ -25,6 +25,9 @@ export default function NotePicker({ open, onClose, selectedIds, onToggle }: Pro
   const [search, setSearch] = useState('');
   const [loading, setLoading] = useState(false);
   const panelRef = useRef<HTMLDivElement>(null);
+
+  // 视口边界检测：右边界超视口时翻转对齐（AI 浮层贴着屏幕右缘，左对齐会出屏）
+  const alignRight = useFlipAlignment(open, panelRef);
 
   // 打开时懒加载笔记列表
   useEffect(() => {
@@ -59,7 +62,9 @@ export default function NotePicker({ open, onClose, selectedIds, onToggle }: Pro
   return (
     <div
       ref={panelRef}
-      className="absolute bottom-full mb-2 left-0 w-72 max-h-64 overflow-hidden rounded-[var(--radius-md)] border border-[var(--color-border)] bg-[var(--color-card)] shadow-lg z-10 flex flex-col"
+      className={`absolute bottom-full mb-2 w-72 max-w-[80vw] max-h-64 overflow-hidden rounded-[var(--radius-md)] border border-[var(--color-border)] bg-[var(--color-card)] shadow-lg z-10 flex flex-col ${
+        alignRight ? 'right-0' : 'left-0'
+      }`}
     >
       {/* 搜索栏 */}
       <div className="flex items-center gap-2 px-3 py-2 border-b border-[var(--color-border)]">
@@ -96,8 +101,8 @@ export default function NotePicker({ open, onClose, selectedIds, onToggle }: Pro
               >
                 <FileText size={14} className="flex-shrink-0" />
                 <span className="truncate">{note.title}</span>
-                {normalizeCategory(note.category) && (
-                  <span className="ml-auto text-xs text-[var(--color-text-tertiary)] flex-shrink-0">{normalizeCategory(note.category)}</span>
+                {note.category && (
+                  <span className="ml-auto text-xs text-[var(--color-text-tertiary)] flex-shrink-0">{note.category}</span>
                 )}
               </button>
             );

@@ -34,6 +34,8 @@ interface SSECallbacks {
   onPlanSynthesize?: () => void;
   onPlanComplete?: (totalSteps: number, completedSteps: number) => void;
   onPlanFallback?: (reason: string) => void;
+  /** 反思事件（L1 综合后自检：checking/refining） */
+  onReflection?: (stage: string, round: number) => void;
   // 工具调用事件回调
   onToolStart?: (name: string) => void;
   onToolEnd?: (name: string, durationMs?: number) => void;

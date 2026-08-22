@@ -1,10 +1,12 @@
 """
 Plan-and-Execute Agent 执行引擎
 
-三阶段状态机：
+阶段状态机：
 - Phase 1: Plan（轻量模型生成执行计划）
 - Phase 2: Execute（逐步执行，每步用 ReAct Agent）
 - Phase 3: Synthesize（汇总结果，生成最终回答）
+- Phase 4: Reflect（可选，综合后自检 L1：批判 → 修正，设计文档
+  AI对话Reflection反思机制设计方案.md；开关 reflection.enable）
 
 通过 SSE 事件流推送计划进度和中间结果给前端。
 """
@@ -12,6 +14,7 @@ Plan-and-Execute Agent 执行引擎
 import asyncio
 import json
 import re
+import time
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import AsyncGenerator, Dict, Any, List, Optional
@@ -20,7 +23,11 @@ from langchain_core.messages import HumanMessage, AIMessage, SystemMessage
 
 from app.ai_service.tool_registry import tool_registry
 from app.core.logger_handler import logger
-from app.utils.config import get_plan_execute_config, get_tool_groups_config
+from app.utils.config import (
+    get_plan_execute_config,
+    get_reflection_config,
+    get_tool_groups_config,
+)
 
 
 # ============================================================
@@ -329,54 +336,99 @@ async def _execute_step(
     )
 
     if step.tool and step.tool != "none":
-        # 需要工具调用 → 使用 ReAct Agent
-        try:
-            from app.ai_service.agent_runner import execute_agent
+        # 需要工具调用 → 使用 ReAct Agent（含 L2 失败修复轮，Part B §9.3 决策 4）
+        from app.ai_service.agent_runner import execute_agent
+        from app.ai_service.reflection import build_repair_note
 
-            # 根据 step.tool 反查工具组，跳过关键词路由
-            step_tool_groups = _resolve_step_tool_groups(step)
+        # 根据 step.tool 反查工具组，跳过关键词路由
+        step_tool_groups = _resolve_step_tool_groups(step)
 
-            accumulated = ""
-            async for event in execute_agent(
-                chat_model=chat_model,
-                user_id=user_id,
-                # 只给步骤 Agent 精简背景（截断），避免其针对完整问题输出完整回答
-                user_message=(
-                    f"用户请求（背景）：{user_message[:200]}\n\n"
-                    f"你的任务（只完成这一步，不要回答完整问题）：{step.action}"
-                ),
-                system_prompt=step_system_prompt,
-                compressed_messages=compressed_messages,
-                db_session_factory=db_session_factory,
-                note_service=note_service,
-                review_service=review_service,
-                email_service=email_service,
-                ppt_service=ppt_service,
-                timeout=step_timeout,
-                override_groups=step_tool_groups,
-                attachment_content=attachment_content,
-            ):
-                event_type = event.get("type", "")
-                if event_type == "response":
-                    # 步骤输出是内部中间结果：只累计供 Synthesize 汇总，
-                    # 不直接透传（否则每个步骤都会把完整回答流式输出给用户，
-                    # 造成重复内容与 token 浪费）
-                    accumulated += event.get("content", "")
-                elif event_type == "error":
-                    yield event
-                    step.result = f"步骤 {step.step} 执行出错"
-                    return
-                elif event_type in ("tool_start", "tool_end", "tool_file", "thinking"):
-                    # 仅透传进度类事件（工具状态/PPT 下载卡片对用户可见）
-                    yield event
-                # stream_done 等其余事件不转发（步骤内部信息不外泄）
+        l2_config = get_reflection_config().get("l2_repair", {})
+        l2_enable = l2_config.get("enable", False)
+        no_retry_tools = set(l2_config.get("no_retry_tools", ["send_email"]))
+        max_repairs = min(int(l2_config.get("max_repair_attempts", 1)), 1)  # 硬顶 1
 
-            step.result = accumulated[:500] if accumulated else f"步骤 {step.step} 完成"
+        accumulated = ""
+        repair_note = ""
+        for attempt in range(max_repairs + 1):
+            failed_tool = None
+            error_event = None
+            try:
+                async for event in execute_agent(
+                    chat_model=chat_model,
+                    user_id=user_id,
+                    # 只给步骤 Agent 精简背景（截断），避免其针对完整问题输出完整回答
+                    user_message=(
+                        f"用户请求（背景）：{user_message[:200]}\n\n"
+                        f"你的任务（只完成这一步，不要回答完整问题）：{step.action}"
+                        + repair_note
+                    ),
+                    system_prompt=step_system_prompt,
+                    compressed_messages=compressed_messages,
+                    db_session_factory=db_session_factory,
+                    note_service=note_service,
+                    review_service=review_service,
+                    email_service=email_service,
+                    ppt_service=ppt_service,
+                    timeout=step_timeout,
+                    override_groups=step_tool_groups,
+                    attachment_content=attachment_content,
+                ):
+                    event_type = event.get("type", "")
+                    # 跟踪流内最后失败的工具（供修复轮定向 + no_retry_tools 判定）
+                    if event_type == "tool_end" and event.get("error"):
+                        failed_tool = event.get("name")
+                    if event_type == "response":
+                        # 步骤输出是内部中间结果：只累计供 Synthesize 汇总，
+                        # 不直接透传（否则每个步骤都会把完整回答流式输出给用户，
+                        # 造成重复内容与 token 浪费）
+                        accumulated += event.get("content", "")
+                    elif event_type == "error":
+                        error_event = event  # 拦截：先决定是否重试
+                        break
+                    elif event_type in ("tool_start", "tool_end", "tool_file", "thinking"):
+                        # 仅透传进度类事件（工具状态/PPT 下载卡片对用户可见）
+                        yield event
+                    # stream_done 等其余事件不转发（步骤内部信息不外泄）
+            except Exception as e:
+                logger.error(f"步骤 {step.step} 执行失败: {e}")
+                error_event = {"type": "error", "content": str(e)}
 
-        except Exception as e:
-            logger.error(f"步骤 {step.step} 执行失败: {e}")
-            step.result = f"步骤 {step.step} 执行失败: {str(e)}"
-            yield {"type": "response", "content": f"\n[步骤 {step.step} 执行异常: {str(e)}]\n"}
+            if error_event is None:
+                break  # 本轮成功
+
+            # 失败 → L2 判定：关闭 / no_retry_tools / 轮次耗尽 → 透传 error 终止
+            if not l2_enable or failed_tool in no_retry_tools or attempt >= max_repairs:
+                if failed_tool in no_retry_tools:
+                    logger.warning(f"L2 修复跳过: 步骤 {step.step} 工具 {failed_tool} 在 no_retry_tools（避免副作用）")
+                if repair_note:
+                    # 修复轮已触发但最终失败 → 指标落盘（P2 增强 1）
+                    from app.utils.reflection_metrics import record_reflection_metric
+                    record_reflection_metric({
+                        "task": "plan_step", "l2_repair_triggered": True,
+                        "l2_repair_success": False, "failed_tool": failed_tool,
+                    })
+                yield error_event
+                step.result = f"步骤 {step.step} 执行出错"
+                return
+
+            # 修复轮：转 repairing 状态事件，回灌失败原因重试本步骤
+            logger.info(f"L2 修复: 步骤 {step.step} 失败（tool={failed_tool}），重试 {attempt + 1}/{max_repairs}")
+            yield {"type": "reflection", "stage": "repairing", "round": attempt + 1}
+            repair_note = build_repair_note(failed_tool, error_event.get("content", ""))
+            accumulated = ""  # 丢弃失败尝试的部分输出
+
+        if repair_note:
+            # 修复轮已结束且成功 → 清空前端 repairing 状态（步骤内 response 不透传，
+            # 前端 onResponse 清空时机不适用，此处显式清空）+ 指标落盘（P2 增强 1）
+            from app.utils.reflection_metrics import record_reflection_metric
+            record_reflection_metric({
+                "task": "plan_step", "l2_repair_triggered": True,
+                "l2_repair_success": True,
+            })
+            yield {"type": "reflection", "stage": "", "round": 0}
+
+        step.result = accumulated[:500] if accumulated else f"步骤 {step.step} 完成"
     else:
         # 不需要工具 → 直接 LLM 生成（输出仅作为内部步骤结果，不透传，
         # 最终回答由 Synthesize 阶段统一生成）
@@ -492,7 +544,7 @@ async def _execute_batch(
 
 
 # ============================================================
-# Phase 3: Synthesize（综合阶段）
+# Phase 3: Synthesize（综合阶段）+ Phase 4: Reflect（反思阶段）
 # ============================================================
 
 def _dedupe_step_results(step_results: List[tuple]) -> List[tuple]:
@@ -535,25 +587,32 @@ def _dedupe_step_results(step_results: List[tuple]) -> List[tuple]:
     return kept
 
 
-async def _synthesize(
-    chat_model,
+def _build_synthesize_prompt(
     plan: ExecutionPlan,
     results: Dict[int, str],
     user_message: str,
-    system_prompt: str,
-    config: dict,
-) -> AsyncGenerator[Dict[str, Any], None]:
+    critique: Optional[str] = None,
+    previous_draft: Optional[str] = None,
+) -> str:
     """
-    汇总所有步骤结果，生成最终回答
-    """
-    yield {"type": "plan_synthesize", "content": "正在汇总结果..."}
+    构建 Synthesize 阶段的 HumanMessage 内容（仅 prompt 文本，不含 SystemMessage——
+    由调用方独立构造，与 _synthesize 现有消息分离模式一致，审查 N-2）
 
+    步骤结果先代码级去重（多个步骤可能输出相同的大段内容，重复交给 Synthesize
+    会导致最终回答重复——修复：重复输出问题），每步截断 300 字符。
+
+    Args:
+        plan: 执行计划
+        results: 步骤结果 {step: result_text}
+        user_message: 用户消息
+        critique: 非空时追加"评审意见"段（反思修正轮）
+        previous_draft: 非空时追加"上一版回答"段（供修正定位，审查 P1-3）
+
+    Returns:
+        填充后的综合提示词文本
+    """
     from app.utils.prompt_loader import load_prompt
 
-    synthesize_timeout = config.get("synthesize_timeout", 60)  # 与 agent.yaml 对齐（P2-1 技术债务）
-
-    # 构建步骤结果摘要（先代码级去重：多个步骤可能输出相同的大段内容，
-    # 重复交给 Synthesize 会导致最终回答重复——修复：重复输出问题）
     plan_summary = plan.goal
     deduped = _dedupe_step_results([
         (step, results.get(step.step, "无结果")) for step in plan.steps
@@ -567,6 +626,80 @@ async def _synthesize(
     prompt = prompt_template.replace("{user_message}", user_message[:500])
     prompt = prompt.replace("{plan_summary}", plan_summary)
     prompt = prompt.replace("{step_results}", step_results_text)
+
+    if previous_draft:
+        prompt += (
+            "\n\n---\n以下为上一版回答（请根据评审意见修正："
+            "严格按评审意见修改问题点，无关内容保持原样）：\n"
+            + previous_draft
+        )
+    if critique:
+        prompt += f"\n\n---\n评审意见（必须修正的问题）：\n{critique}"
+
+    return prompt
+
+
+async def _generate_answer_buffered(
+    chat_model,
+    plan: ExecutionPlan,
+    results: Dict[int, str],
+    user_message: str,
+    system_prompt: str,
+    config: dict,
+    critique: Optional[str] = None,
+    previous_draft: Optional[str] = None,
+) -> str:
+    """
+    非流式生成完整回答文本（反思路径专用）
+
+    消息构造与 _synthesize 一致：SystemMessage（system_prompt[:2000]）独立、
+    HumanMessage 承载 prompt（审查 N-2）。本函数**不发出任何 SSE 事件**
+    （纯文本生成，三轮审查 #4：降级时 plan_synthesize 由 _synthesize 延迟发出，
+    不存在"重复事件"）。
+
+    Args:
+        critique: 评审意见（修正轮注入）
+        previous_draft: 上一版回答（修正轮注入，供定位）
+
+    Returns:
+        完整回答文本
+
+    Raises:
+        asyncio.TimeoutError: 生成超时（调用方负责降级兜底）
+    """
+    synthesize_timeout = config.get("synthesize_timeout", 60)  # 与 agent.yaml 对齐（P2-1 技术债务）
+
+    prompt = _build_synthesize_prompt(
+        plan, results, user_message,
+        critique=critique, previous_draft=previous_draft,
+    )
+    messages = [
+        SystemMessage(content=system_prompt[:2000]),
+        HumanMessage(content=prompt),
+    ]
+    async with asyncio.timeout(synthesize_timeout):
+        response = await chat_model.ainvoke(messages)
+
+    content = getattr(response, "content", "") or ""
+    return str(content)
+
+
+async def _synthesize(
+    chat_model,
+    plan: ExecutionPlan,
+    results: Dict[int, str],
+    user_message: str,
+    system_prompt: str,
+    config: dict,
+) -> AsyncGenerator[Dict[str, Any], None]:
+    """
+    汇总所有步骤结果，生成最终回答（原流式路径，行为与反思引入前一致）
+    """
+    yield {"type": "plan_synthesize", "content": "正在汇总结果..."}
+
+    synthesize_timeout = config.get("synthesize_timeout", 60)  # 与 agent.yaml 对齐（P2-1 技术债务）
+
+    prompt = _build_synthesize_prompt(plan, results, user_message)
 
     try:
         async with asyncio.timeout(synthesize_timeout):
@@ -588,6 +721,170 @@ async def _synthesize(
     except Exception as e:
         logger.error(f"Synthesize 阶段失败: {e}")
         yield {"type": "response", "content": f"\n\n[结果汇总失败: {str(e)}]"}
+
+
+async def _synthesize_with_reflection(
+    chat_model,
+    plan_model,
+    plan: ExecutionPlan,
+    results: Dict[int, str],
+    user_message: str,
+    system_prompt: str,
+    config: dict,
+    reflection_config: dict,
+    start_time: float,
+) -> AsyncGenerator[Dict[str, Any], None]:
+    """
+    Phase 3 + Phase 4：缓冲生成草稿 → 批判 →（必要时修正）→ 一次性流出
+
+    设计文档：AI对话Reflection反思机制设计方案.md §2.1/§3.2/§3.7/§3.9。
+    失败兜底贯穿始终：
+    - 初始草稿超时/失败 → 降级 _synthesize 流式（P0-2 防空回答）
+    - 短回答（< min_answer_chars）→ 不批判直接流出
+    - 预算检查：已用 > total_timeout × 0.8 → 跳过反思（P0-1）
+    - 修正草稿超时/失败 → 保留上一版草稿继续
+    - 批判失败 → 视为通过（reflection.critique_answer 内 fail-safe）
+
+    Args:
+        plan_model: 轻量模型（critic_model="light" 时的批判模型）
+        start_time: execute_plan_agent 入口的 time.monotonic()（预算检查基准）
+    """
+    from app.ai_service.reflection import critique_answer
+
+    yield {"type": "plan_synthesize", "content": "正在汇总结果..."}
+
+    total_timeout = config.get("total_timeout", 300)
+    max_refine_rounds = min(reflection_config.get("max_refine_rounds", 1), 2)  # 硬顶 2（Part B 决策 3）
+    min_answer_chars = reflection_config.get("trigger", {}).get("min_answer_chars", 500)
+    critic_timeout = reflection_config.get("critic_timeout", 15)
+
+    # 批判模型选择：light → 复用 plan_model；main → 主模型（不新增模型实例，Part B 决策 1）
+    critic_model = (
+        plan_model
+        if reflection_config.get("critic_model", "light") == "light"
+        else chat_model
+    )
+
+    # ===== 草稿①：缓冲生成（不流式，不发出 SSE 事件）=====
+    try:
+        draft = await _generate_answer_buffered(
+            chat_model, plan, results, user_message, system_prompt, config,
+        )
+    except asyncio.TimeoutError:
+        logger.warning("反思路径：初始草稿生成超时，降级 _synthesize 流式")
+        async for event in _synthesize(
+            chat_model=chat_model, plan=plan, results=results,
+            user_message=user_message, system_prompt=system_prompt, config=config,
+        ):
+            yield event
+        return
+    except Exception as e:
+        logger.error(f"反思路径：初始草稿生成失败，降级 _synthesize 流式: {e}")
+        async for event in _synthesize(
+            chat_model=chat_model, plan=plan, results=results,
+            user_message=user_message, system_prompt=system_prompt, config=config,
+        ):
+            yield event
+        return
+
+    # 触发门槛：短回答不批判（零额外调用）
+    if len(draft) < min_answer_chars:
+        from app.utils.reflection_metrics import record_reflection_metric
+        metric = {
+            "task": "plan_execute", "triggered": False,
+            "draft_chars": len(draft), "reason": "short",
+        }
+        logger.info(f"reflection_metric | task=plan_execute | triggered=false | draft_chars={len(draft)} | reason=short")
+        record_reflection_metric(metric)
+        yield {"type": "response", "content": draft}
+        return
+
+    # 预算检查（P0-1）：已用 > 80% 预算 → 跳过反思直接流出
+    elapsed = time.monotonic() - start_time
+    if elapsed > total_timeout * 0.8:
+        logger.warning(f"反思路径：已用 {elapsed:.0f}s > 80% 预算，跳过反思")
+        yield {"type": "response", "content": draft}
+        return
+
+    # 步骤结果摘要（与 Synthesize 同口径：去重 + 每步 300 截断，供批判核对事实）
+    deduped = _dedupe_step_results([
+        (step, results.get(step.step, "无结果")) for step in plan.steps
+    ])
+    step_results_text = "\n\n".join(
+        f"步骤 {step.step}（{step.action}）：{result_text[:300]}"
+        for step, result_text in deduped
+    )
+
+    # ===== 批判 + 修正循环 =====
+    yield {"type": "reflection", "stage": "checking", "round": 0}
+    refine_rounds = 0
+    critique_latencies: List[int] = []
+    last_action = "critique"  # 循环退出原因：passed / refined / refine_failed
+
+    for r in range(1, max_refine_rounds + 1):
+        t0 = time.monotonic()
+        verdict = await critique_answer(
+            critic_model, user_message, plan.goal, step_results_text, draft,
+            timeout=critic_timeout,
+        )
+        critique_latencies.append(int((time.monotonic() - t0) * 1000))
+
+        if verdict.passed:
+            last_action = "passed"
+            break
+
+        # 不合格 → 修正（注入评审意见 + 上一版草稿供定位）
+        yield {"type": "reflection", "stage": "refining", "round": r}
+        previous_draft = draft
+        try:
+            draft = await _generate_answer_buffered(
+                chat_model, plan, results, user_message, system_prompt, config,
+                critique=verdict.issues, previous_draft=previous_draft,
+            )
+            refine_rounds += 1
+            last_action = "refined"
+        except asyncio.TimeoutError:
+            logger.warning(f"反思路径：第 {r} 轮修正超时，保留上一版草稿")
+            draft = previous_draft
+            last_action = "refine_failed"
+            break
+        except Exception as e:
+            logger.error(f"反思路径：第 {r} 轮修正失败，保留上一版草稿: {e}")
+            draft = previous_draft
+            last_action = "refine_failed"
+            break
+
+    # check_final：仅当最终草稿未被"通过"判定覆盖时补一次批判（纯度量，
+    # 不触发额外修正；一次通过路径的该次批判已记录通过结论，不重复花 15s，
+    # 审查三轮 #1）
+    final_passed = last_action == "passed"
+    if last_action != "passed":
+        t0 = time.monotonic()
+        final_verdict = await critique_answer(
+            critic_model, user_message, plan.goal, step_results_text, draft,
+            timeout=critic_timeout,
+        )
+        critique_latencies.append(int((time.monotonic() - t0) * 1000))
+        final_passed = final_verdict.passed
+
+    logger.info(
+        f"reflection_metric | task=plan_execute | triggered=true "
+        f"| draft_chars={len(draft)} | refine_rounds={refine_rounds} "
+        f"| final_passed={final_passed} | latency_ms={sum(critique_latencies)} "
+        f"| critique_latency_ms={critique_latencies}"
+    )
+    # P2 增强 1：结构化指标落盘（scripts/reflection_stats.py 消费）
+    from app.utils.reflection_metrics import record_reflection_metric
+    record_reflection_metric({
+        "task": "plan_execute", "triggered": True,
+        "draft_chars": len(draft), "refine_rounds": refine_rounds,
+        "final_passed": final_passed,
+        "latency_ms": sum(critique_latencies),
+        "critique_latency_ms": critique_latencies,
+    })
+
+    # 一次性流出最终回答（无打字机效果，复杂任务可接受，设计 §3.5）
+    yield {"type": "response", "content": draft}
 
 
 # ============================================================
@@ -613,7 +910,7 @@ async def execute_plan_agent(
     """
     Plan-and-Execute Agent 执行器
 
-    三阶段：Plan → Execute → Synthesize
+    阶段：Plan → Execute → Synthesize（→ Reflect，reflection.enable 开启时）
 
     Args:
         chat_model: 主模型（用于 Execute + Synthesize）
@@ -634,6 +931,7 @@ async def execute_plan_agent(
         SSE 事件字典
     """
     config = get_plan_execute_config()
+    reflection_config = get_reflection_config()
     total_timeout = config.get("total_timeout", timeout)
 
     # 仅发附件（空消息）时提供兜底文本，避免 plan/synthesize 提示词空洞
@@ -641,6 +939,7 @@ async def execute_plan_agent(
 
     try:
         async with asyncio.timeout(total_timeout):
+            start_time = time.monotonic()  # 反思预算检查基准（P0-1）
             # ===== Phase 1: Plan =====
             try:
                 plan = await _generate_plan(
@@ -696,16 +995,31 @@ async def execute_plan_agent(
                     if event.get("type") == "plan_step_end":
                         completed_steps += 1
 
-            # ===== Phase 3: Synthesize =====    汇总结果
-            async for event in _synthesize(
-                chat_model=chat_model,
-                plan=plan,
-                results=previous_results,
-                user_message=effective_message,
-                system_prompt=system_prompt,
-                config=config,
-            ):
-                yield event
+            # ===== Phase 3+4: Synthesize + Reflect =====    汇总结果（+ 综合后自检 L1）
+            if reflection_config.get("enable", False):
+                async for event in _synthesize_with_reflection(
+                    chat_model=chat_model,
+                    plan_model=plan_model,
+                    plan=plan,
+                    results=previous_results,
+                    user_message=effective_message,
+                    system_prompt=system_prompt,
+                    config=config,
+                    reflection_config=reflection_config,
+                    start_time=start_time,
+                ):
+                    yield event
+            else:
+                # 反思关闭：原流式路径（行为与改动前一致）
+                async for event in _synthesize(
+                    chat_model=chat_model,
+                    plan=plan,
+                    results=previous_results,
+                    user_message=effective_message,
+                    system_prompt=system_prompt,
+                    config=config,
+                ):
+                    yield event
 
             # 完成事件
             yield {

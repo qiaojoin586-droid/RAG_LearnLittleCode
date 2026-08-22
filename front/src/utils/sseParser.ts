@@ -82,6 +82,7 @@ export interface SSEDispatchCallbacks {
   onPlanSynthesize?: () => void;
   onPlanComplete?: (totalSteps: number, completedSteps: number) => void;
   onPlanFallback?: (reason: string) => void;
+  onReflection?: (stage: string, round: number) => void;
   onToolStart?: (name: string) => void;
   onToolEnd?: (name: string, durationMs?: number) => void;
   onToolFile?: (info: SSEEvent) => void;
@@ -144,6 +145,9 @@ export function dispatchSSEEvents(events: SSEEvent[], callbacks: SSEDispatchCall
         break;
       case 'plan_fallback':
         callbacks.onPlanFallback?.(String(data.reason || ''));
+        break;
+      case 'reflection':
+        callbacks.onReflection?.(String(data.stage || ''), Number(data.round || 0));
         break;
       case 'tool_start':
         callbacks.onToolStart?.(String(data.name || ''));

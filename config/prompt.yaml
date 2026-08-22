@@ -13,3 +13,5 @@ prompts:
   classify_complexity: "prompts/classify_complexity.txt"
   plan_generation: "prompts/plan_generation.txt"
   plan_synthesize: "prompts/plan_synthesize.txt"
+  # Reflection 反思机制（L1 综合后自检，设计文档：AI对话Reflection反思机制设计方案.md）
+  reflection_critique: "prompts/reflection_critique.txt"

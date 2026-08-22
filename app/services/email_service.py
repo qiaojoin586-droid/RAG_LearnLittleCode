@@ -11,11 +11,14 @@
 """
 
 import asyncio
+import gc
 import html as html_lib
 import logging
 import os
 import random
 import re
+import tempfile
+import time
 from email.header import Header
 from email.mime.application import MIMEApplication
 from email.mime.multipart import MIMEMultipart
@@ -34,6 +37,25 @@ CODE_TTL = 300
 MAX_CODE_ATTEMPTS = 5
 # 错误计数保留时长（秒）
 ERROR_COUNT_TTL = 900
+# PDF 渲染最大页数（防排版异常导致死循环）
+_MAX_PDF_PAGES = 200
+
+
+def _remove_temp_file(path: str, attempts: int = 3) -> None:
+    """
+    尽力删除临时文件（Windows 下杀毒软件/索引器可能短暂占用句柄）
+
+    删除失败只告警不抛异常——临时文件残留无害（系统会定期清理 %TEMP%），
+    绝不能因为清理失败让已经渲染成功的 PDF 被判为失败。
+    """
+    for i in range(attempts):
+        try:
+            os.remove(path)
+            return
+        except OSError:
+            if i < attempts - 1:
+                time.sleep(0.2 * (i + 1))
+    logger.warning(f"临时文件删除失败（可忽略，系统会定期清理）: {path}")
 
 
 class EmailService:
@@ -125,7 +147,16 @@ class EmailService:
 
         # 附件挂在 mixed 外层（文件名含中文时用 RFC2231 编码）
         for att in attachments or []:
-            part = MIMEApplication(att["data"], _subtype=att.get("mime", "application/octet-stream").split("/")[-1])
+            mime = att.get("mime", "application/octet-stream")
+            main_type, _, sub_type = mime.partition("/")
+            # ⚠️ 不能用 MIMEApplication 包 text/*：会把 text/markdown 变成
+            # application/markdown，部分邮件客户端无法识别附件
+            if main_type == "text":
+                data = att["data"]
+                text = data.decode("utf-8") if isinstance(data, bytes) else data
+                part = MIMEText(text, sub_type or "plain", "utf-8")
+            else:
+                part = MIMEApplication(att["data"], _subtype=sub_type or "octet-stream")
             part.add_header("Content-Disposition", "attachment", filename=("utf-8", "", att["filename"]))
             msg.attach(part)
 
@@ -227,12 +258,16 @@ class EmailService:
         await redis.delete(f"email_code_errors:{email}")
         return True
 
-    def render_markdown_pdf(self, title: str, content: str) -> bytes:   # TODO 这个有点问题不能唱正常发送邮件
+    def render_markdown_pdf(self, title: str, content: str) -> bytes:
         """
-        将 Markdown 内容渲染为 PDF（A4 页面）
+        将 Markdown 内容渲染为 PDF（A4 多页排版）
 
-        使用 PyMuPDF insert_htmlbox 渲染（自动换行、支持中文字体）；
-        若 htmlbox 不可用则降级为 insert_font + insert_text 纯文本排版。
+        使用 PyMuPDF Story 渲染（自动换行、支持中文、按自然字号分页）；
+        若 HTML 转换失败则降级为 insert_font + insert_text 纯文本排版。
+
+        注意：不能用 insert_htmlbox 直接塞一页——它默认 scale_low=0 会把
+        长文档按比例缩进单页（实测 30 段笔记缩到 4~8pt，完全不可读），
+        因此改用 Story + DocumentWriter 逐页排版（写入临时文件后读回内存）。
 
         Args:
             title: 文档标题（仅用于降级模式的页首标题）
@@ -242,7 +277,7 @@ class EmailService:
             PDF 二进制内容
 
         Raises:
-            RuntimeError: 未找到可用的中文字体时
+            RuntimeError: 未找到可用的中文字体时（仅降级模式）
         """
         import fitz
 
@@ -252,17 +287,80 @@ class EmailService:
             logger.warning(f"Markdown→HTML 转换失败，降级纯文本: {e}")
             html_body = None
 
-        doc = fitz.open()
+        tmp_path = None
         try:
-            page = doc.new_page(width=595, height=842)  # A4
-            if html_body:
-                css = '* { font-family: "Microsoft YaHei", "PingFang SC", "Noto Sans CJK SC", sans-serif; }'
-                page.insert_htmlbox(fitz.Rect(72, 72, 523, 800), html_body, css=css)
-            else:
+            # 空 HTML 走 Story 只会得到一张空白页，交给降级路径渲染标题更合理
+            if html_body and html_body.strip():
+                # 笔记导出排版样式（PyMuPDF Story 支持的 CSS 子集：
+                # 颜色/字号/边框/背景色/内边距，不支持 float/flex 等现代布局）
+                css = (
+                    '* { font-family: "Microsoft YaHei", "PingFang SC", '
+                    '"Noto Sans CJK SC", sans-serif; font-size: 12px; line-height: 1.6; } '
+                    'h1 { font-size: 22px; color: #1a1a2e; border-bottom: 2px solid #4a90d9; '
+                    'padding-bottom: 4px; margin-bottom: 10px; } '
+                    'h2 { font-size: 18px; color: #2c3e50; margin-top: 14px; } '
+                    'h3 { font-size: 15px; color: #2c3e50; margin-top: 10px; } '
+                    'h4, h5, h6 { font-size: 13px; color: #2c3e50; } '
+                    'p { margin: 4px 0; } '
+                    'code { font-family: Consolas, monospace; background-color: #f4f4f4; padding: 0 3px; } '
+                    'pre { background-color: #f6f8fa; border-left: 3px solid #4a90d9; '
+                    'padding: 8px; margin: 8px 0; } '
+                    'pre code { background-color: transparent; padding: 0; } '
+                    'blockquote { border-left: 3px solid #cccccc; color: #555555; '
+                    'padding-left: 8px; margin: 8px 0; } '
+                    'a { color: #4a90d9; text-decoration: underline; } '
+                    'table, th, td { border: 1px solid #bbbbbb; border-collapse: collapse; } '
+                    'th { background-color: #eef2f7; font-weight: bold; } '
+                    'td, th { padding: 5px 8px; text-align: left; } '
+                    'table { margin: 8px 0; } '
+                    'ul, ol { margin: 4px 0; padding-left: 20px; } '
+                    'li { margin: 2px 0; } '
+                    'hr { border: none; border-top: 1px solid #dddddd; margin: 12px 0; } '
+                )
+                story = fitz.Story(html=html_body, user_css=css)
+                where = fitz.Rect(72, 72, 523, 788)
+                # DocumentWriter 只接受文件路径，先写临时文件再读回内存
+                fd, tmp_path = tempfile.mkstemp(suffix=".pdf")
+                os.close(fd)
+                writer = fitz.DocumentWriter(tmp_path)
+                try:
+                    more = True
+                    pages = 0
+                    while more and pages < _MAX_PDF_PAGES:
+                        dev = writer.begin_page(fitz.paper_rect("a4"))
+                        more, _ = story.place(where)
+                        story.draw(dev, None)
+                        writer.end_page()
+                        pages += 1
+                    if more:
+                        logger.warning(f"PDF 超过 {_MAX_PDF_PAGES} 页上限，内容被截断")
+                finally:
+                    writer.close()
+                    # Windows 下 close() 后 C 层文件句柄要等 GC 才释放，否则无法删除临时文件
+                    del writer
+                    gc.collect()
+                # 重新打开做字体子集化：Story 会整包嵌入 CJK 回退字体（~3.5MB → ~20KB）
+                reader = fitz.open(tmp_path)
+                try:
+                    reader.subset_fonts()
+                    return reader.tobytes(garbage=3, deflate=True)
+                finally:
+                    reader.close()
+                    # Windows 下 close() 后 C 层句柄可能仍被持有，强制释放后再删临时文件
+                    del reader
+                    gc.collect()
+            doc = fitz.open()
+            try:
+                page = doc.new_page(width=595, height=842)  # A4
                 self._render_pdf_plain(doc, page, title, content)
-            return doc.tobytes()
+                # 降级路径会整包嵌入 msyh.ttc（~19MB → ~35KB）
+                doc.subset_fonts()
+                return doc.tobytes(garbage=3, deflate=True)
+            finally:
+                doc.close()
         finally:
-            doc.close()
+            if tmp_path and os.path.exists(tmp_path):
+                _remove_temp_file(tmp_path)
 
     def _render_pdf_plain(self, doc, page, title: str, content: str) -> None:
         """降级方案：insert_font + insert_text 纯文本排版（手动换行分页）"""
@@ -345,21 +443,65 @@ def _md_inline(s: str) -> str:
 
 
 def _markdown_to_html(md_text: str) -> str:
-    """轻量 Markdown → HTML（标题/列表/引用/分割线/段落）"""
+    """
+    Markdown → HTML（邮件 PDF 渲染用）
+
+    优先使用标准 markdown 库（完整语法：表格/有序无序列表/嵌套列表/
+    围栏代码块/链接等），库缺失或转换异常时降级为内置轻量解析器。
+    """
+    try:
+        import markdown as md_lib
+    except ImportError:
+        return _markdown_to_html_legacy(md_text)
+    try:
+        html = md_lib.markdown(
+            md_text,
+            extensions=["tables", "fenced_code", "sane_lists"],
+        )
+        # 图片占位：Story 无法加载远程/本地图片，转成文字占位符避免渲染空白
+        html = re.sub(r'<img[^>]*alt="([^"]*)"[^>]*/?>', r"[图片: \1]", html)
+        return html
+    except Exception as e:
+        logger.warning(f"markdown 库转换失败，降级内置解析器: {e}")
+        return _markdown_to_html_legacy(md_text)
+
+
+def _markdown_to_html_legacy(md_text: str) -> str:
+    """内置轻量 Markdown → HTML（标题/列表/引用/分割线/代码块/段落；markdown 库缺失时的降级方案）"""
     parts = []
     in_list = False
+    in_code = False
+    code_lines: List[str] = []
+
+    def close_list() -> None:
+        nonlocal in_list
+        if in_list:
+            parts.append("</ul>")
+            in_list = False
+
     for raw in md_text.splitlines():
         line = raw.rstrip()
+        if line.strip().startswith("```"):
+            # 代码围栏：开/关成对出现，块内行原样收集（保留缩进）
+            if in_code:
+                parts.append(
+                    f"<pre><code>{html_lib.escape(chr(10).join(code_lines))}</code></pre>"
+                )
+                code_lines = []
+                in_code = False
+            else:
+                close_list()
+                in_code = True
+            continue
+        if in_code:
+            code_lines.append(line)
+            continue
         if not line:
-            if in_list:
-                parts.append("</ul>")
-                in_list = False
+            close_list()
             continue
         stripped = line.lstrip()
         if line.startswith("#"):
-            if in_list:
-                parts.append("</ul>")
-                in_list = False
+            close_list()
             level = min(len(line) - len(line.lstrip("#")), 4)
             parts.append(f"<h{level}>{_md_inline(stripped.lstrip('#').strip())}</h{level}>")
         elif stripped.startswith(("-", "*", "+")) and not stripped.startswith("**"):
@@ -368,29 +510,17 @@ def _markdown_to_html(md_text: str) -> str:
                 in_list = True
             parts.append(f"<li>{_md_inline(stripped[1:].strip())}</li>")
         elif stripped.startswith(">"):
-            if in_list:
-                parts.append("</ul>")
-                in_list = False
+            close_list()
             parts.append(f"<p style='color:#666666;'>{_md_inline(stripped.lstrip('>').strip())}</p>")
-        elif stripped.startswith("```"):
-            if in_list:
-                parts.append("</ul>")
-                in_list = False
-            parts.append("<pre>")
-        elif line.strip() == "---" or line.strip() == "***":
-            if in_list:
-                parts.append("</ul>")
-                in_list = False
+        elif line.strip() in ("---", "***"):
+            close_list()
             parts.append("<hr/>")
-        elif parts and parts[-1] == "<pre>":
-            parts.append(f"<code>{html_lib.escape(line)}</code>")
         else:
-            if in_list:
-                parts.append("</ul>")
-                in_list = False
+            close_list()
             parts.append(f"<p>{_md_inline(line)}</p>")
-    if in_list:
-        parts.append("</ul>")
+    close_list()
+    if in_code:  # 兜底：未闭合的代码围栏也输出
+        parts.append(f"<pre><code>{html_lib.escape(chr(10).join(code_lines))}</code></pre>")
     return "\n".join(parts)
 
 

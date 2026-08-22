@@ -91,6 +91,29 @@ async def cleanup_orphan_chat_attachments() -> int:
             raise
 
 
+async def cleanup_expired_categories() -> int:
+    """
+    清理过期分类（deleted_at 超过 14 天）→ 返回删除数量
+
+    与 cleanup_expired_notes 对齐；物理删除前保护活跃子分类（提升为顶级）。
+    """
+    from app.db.database import async_session_factory
+    from app.services.category_service import CategoryService
+
+    async with async_session_factory() as db:
+        try:
+            count = await CategoryService().cleanup_expired_categories(
+                db, days=CLEANUP_EXPIRED_DAYS
+            )
+            await db.commit()
+            logger.info(f"定时清理过期分类完成: 删除 {count} 个")
+            return count
+        except Exception as e:
+            await db.rollback()
+            logger.error(f"定时清理过期分类失败: {e}")
+            raise
+
+
 def init_scheduler() -> None:
     """初始化并启动定时任务（仅在非 reload 模式下由 main.py 调用）"""
     scheduler.add_job(
@@ -110,6 +133,14 @@ def init_scheduler() -> None:
         misfire_grace_time=3600,
     )
     scheduler.add_job(
+        cleanup_expired_categories,
+        trigger=CronTrigger(hour=3, minute=30),
+        id="cleanup_expired_categories",
+        name="清理过期分类",
+        replace_existing=True,
+        misfire_grace_time=3600,
+    )
+    scheduler.add_job(
         cleanup_orphan_tts_files,
         trigger=CronTrigger(hour=3, minute=40),
         id="cleanup_orphan_tts_files",
@@ -120,7 +151,7 @@ def init_scheduler() -> None:
     scheduler.start()
     logger.info(
         "定时任务调度器已启动（03:00 清理回收站过期笔记，"
-        "03:20 清理孤儿聊天附件，03:40 清理过期 TTS 文件）"
+        "03:20 清理孤儿聊天附件，03:30 清理过期分类，03:40 清理过期 TTS 文件）"
     )
 
 

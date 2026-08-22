@@ -117,6 +117,21 @@ describe('dispatchSSEEvents', () => {
     expect(cbs.onPlanFallback).toHaveBeenCalledWith('步骤过多');
   });
 
+  it('路由 reflection 反思事件（L1 综合后自检）', () => {
+    const cbs = {
+      onReflection: vi.fn(),
+    };
+    dispatchSSEEvents(
+      [
+        { type: 'reflection', stage: 'checking', round: 0 },
+        { type: 'reflection', stage: 'refining', round: 1 },
+      ],
+      cbs,
+    );
+    expect(cbs.onReflection).toHaveBeenNthCalledWith(1, 'checking', 0);
+    expect(cbs.onReflection).toHaveBeenNthCalledWith(2, 'refining', 1);
+  });
+
   it('路由工具调用事件（含 tool_file）', () => {
     const cbs = {
       onToolStart: vi.fn(),

@@ -16,6 +16,8 @@
 - DELETE /note/{note_id}/permanent - 彻底删除笔记
 """
 
+from typing import Optional
+
 from fastapi import APIRouter, Depends, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -52,6 +54,9 @@ async def create_note(
 ):
     """创建新笔记，自动触发向量双写和异步标签生成"""
     note = await _get_note_service().create_note(db, user_id, data)
+    # 显式 commit：调用方紧随其后读取列表，避免 get_db auto-commit
+    # 在响应发送后才落地的竞态（与 category_router 写操作同一约定）
+    await db.commit()
     return success_response(data=NoteResponse.model_validate(note).model_dump())
 
 
@@ -59,12 +64,15 @@ async def create_note(
 async def list_notes(
     page: int = Query(1, ge=1),
     page_size: int = Query(20, ge=1, le=100),
-    category: str = Query(None),
+    category_id: str = Query(None, description="按分类 ID 过滤（__uncategorized__ = 未分类）"),
+    category: str = Query(None, description="按分类字符串过滤（向后兼容）"),
     user_id: str = Depends(get_current_user_id),
     db: AsyncSession = Depends(get_db),
 ):
-    """分页获取笔记列表，支持按分类过滤"""
-    notes, total = await _get_note_service().list_notes(db, user_id, page, page_size, category)
+    """分页获取笔记列表，支持按分类 ID / 分类字符串过滤"""
+    notes, total = await _get_note_service().list_notes(
+        db, user_id, page, page_size, category, category_id
+    )
     return success_response(data=NoteListResponse(
         notes=[NoteResponse.model_validate(n).model_dump() for n in notes],
         total=total, page=page, page_size=page_size,
@@ -125,6 +133,23 @@ async def update_note(
 ):
     """更新笔记内容，同步更新向量"""
     note = await _get_note_service().update_note(db, note_id, user_id, data)
+    # 显式 commit（写操作统一约定，见 move_note_to_category 注释）
+    await db.commit()
+    return success_response(data=NoteResponse.model_validate(note).model_dump())
+
+
+@router.put("/note/{note_id}/category", summary="移动笔记到分类")
+async def move_note_to_category(
+    note_id: str,
+    category_id: Optional[str] = Query(None, description="目标分类 ID；不传或空表示移为未分类"),
+    user_id: str = Depends(get_current_user_id),
+    db: AsyncSession = Depends(get_db),
+):
+    """将笔记移动到指定分类（双写期间同步更新 category 字符串）"""
+    note = await _get_note_service().move_note_by_id(db, note_id, user_id, category_id)
+    # ★ 显式 commit：调用方可能紧随其后读取列表，避免 get_db auto-commit
+    # 在响应发送后才落地的竞态（与 category_router 写操作同一约定）
+    await db.commit()
     return success_response(data=NoteResponse.model_validate(note).model_dump())
 
 
@@ -136,6 +161,8 @@ async def delete_note(
 ):
     """软删除笔记（移入回收站）"""
     await _get_note_service().delete_note(db, note_id, user_id)
+    # 显式 commit（写操作统一约定，见 move_note_to_category 注释）
+    await db.commit()
     return success_response(message="笔记已删除")
 
 
@@ -150,6 +177,9 @@ async def restore_note(
 ):
     """从回收站恢复笔记（清除 deleted_at + 重建 ChromaDB 向量）"""
     await _get_note_service().restore_note(db, note_id, user_id)
+    # 显式 commit：前端恢复成功后立即重拉回收站列表，
+    # 避免 auto-commit 落库晚于刷新请求（条目"恢复后仍在"的竞态）
+    await db.commit()
     return success_response(message="笔记已恢复")
 
 
@@ -178,17 +208,25 @@ async def permanent_delete_note(
         )
 
     await _get_note_service().permanent_delete(db, note_id, user_id)
+    # 显式 commit：前端彻底删除成功后立即重拉回收站列表，
+    # 避免 auto-commit 落库晚于刷新请求（条目"删除后仍在"的竞态——本 bug 根因）
+    await db.commit()
     return success_response(message="笔记已彻底删除")
 
 
-@router.post("/note/search", summary="语义搜索")
+@router.post("/note/search", summary="关键词搜索")
 async def search_notes(
     data: NoteSearchRequest,
     user_id: str = Depends(get_current_user_id),
     db: AsyncSession = Depends(get_db),
 ):
-    """基于 ChromaDB 的语义搜索"""
-    results = await _get_note_service().semantic_search(db, user_id, data.query, data.top_k)
+    """基于 MySQL 的标题/正文关键词搜索（LIKE 模糊匹配）
+
+    不依赖外部 Embedding 服务，稳定零外部依赖；响应格式保持
+    {query, results: [{note, score}]}，score 仅作排序权重（标题命中 1.0 > 正文命中 0.5）。
+    语义搜索仍保留给 AI 对话的 search_notes_tool 使用（note_service.semantic_search）。
+    """
+    results = await _get_note_service().keyword_search(db, user_id, data.query, data.top_k)
     return success_response(data={
         "query": data.query,
         "results": [
@@ -225,7 +263,12 @@ async def batch_operation(
             elif data.operation == 'unpin':
                 await note_service.unpin_note(db, note_id, user_id)
             elif data.operation == 'move':
-                await note_service.move_note(db, note_id, user_id, data.target_category)
+                if data.target_category_id:
+                    # 新逻辑：按 category_id 移动，同步写入 category 字符串
+                    await note_service.move_note_by_id(db, note_id, user_id, data.target_category_id)
+                else:
+                    # 旧逻辑：按字符串移动（向后兼容）
+                    await note_service.move_note(db, note_id, user_id, data.target_category)
             elif data.operation == 'permanent_delete':
                 await note_service.permanent_delete(db, note_id, user_id)
             elif data.operation == 'restore':
