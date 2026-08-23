@@ -4,6 +4,9 @@
 
 **AI 驱动的个人知识管理助手 —— 让笔记拥有记忆，让对话理解一切**
 
+![GitHub stars](https://img.shields.io/github/stars/qiaojoin586-droid/RAG_LearnLittleCode?style=social)
+![GitHub forks](https://img.shields.io/github/forks/qiaojoin586-droid/RAG_LearnLittleCode?style=social)
+
 `RAG` `Agent` `多模态` `FastAPI` `LangGraph` `React`
 
 ![Python](https://img.shields.io/badge/Python-3.10%2B-3776AB?logo=python&logoColor=white)
