@@ -40,5 +40,8 @@ htmlcov/
 .pytest_cache/
 backups/
 
+# 本地工具目录（不入库）
+.workbuddy/
+
 # 设计文档（历史版本，仅本地保留，不入库）
 docs/设计方案（不可提交）/
