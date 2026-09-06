@@ -59,6 +59,7 @@ class BackgroundInitManager:
         self.chat_model_thinking = None # 深度思考模型（思考模式开启，前端开关控制）
         self.embed_model = None
         self.vision_model = None
+        self.autocomplete_model = None  # AI 联机补全模型（轻量独立实例）
         self.note_service = None
         self.reorder_service = None
         self.rag_service = None  # RAG 服务（阶段 3 后创建）
@@ -127,6 +128,7 @@ class BackgroundInitManager:
             from app.utils.factory import (
                 create_chat_model, create_embed_model,
                 create_classifier_model, create_plan_model, create_vision_model,
+                create_autocomplete_model,
             )
             self.chat_model = create_chat_model(enable_thinking=False)  # 默认关闭思考
             try:
@@ -157,6 +159,16 @@ class BackgroundInitManager:
             except Exception as e:
                 logger.warning(f"Plan 模型初始化失败，Plan-Execute 不可用: {e}")
                 self.plan_model = None
+            # AI 联机补全模型（轻量，独立实例；AUTOCOMPLETE_ENABLED=false 时返回 None）
+            try:
+                self.autocomplete_model = create_autocomplete_model()
+                if self.autocomplete_model is None:
+                    logger.info("AI 联机补全已禁用（AUTOCOMPLETE_ENABLED=false）")
+                else:
+                    logger.info("补全模型初始化成功")
+            except Exception as e:
+                logger.warning(f"补全模型初始化失败，AI 联机补全不可用: {e}")
+                self.autocomplete_model = None
             logger.info("AI 模型初始化成功")
         except Exception as e:
             logger.warning(f"AI 模型初始化失败（部分功能不可用）: {e}")
@@ -171,6 +183,9 @@ class BackgroundInitManager:
             self.note_service = NoteService(
                 vector_store=vector_store,
                 chat_model=self.chat_model,
+                # ★ C5：补全模型必须在阶段 2 注入，漏掉则 ai_autocomplete 恒返回空
+                #（静默失效且无日志）
+                autocomplete_model=self.autocomplete_model,
             )
             logger.info("NoteService + ChromaDB 初始化成功")
         except Exception as e:

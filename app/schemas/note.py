@@ -93,14 +93,32 @@ class NoteSearchResponse(BaseModel):
 
 class AutocompleteRequest(BaseModel):
     """AI 内联补全请求"""
-    content: str = Field(..., description="当前笔记内容")
-    cursor_position: int = Field(0, ge=0, description="光标位置")
+    content: str = Field(..., max_length=2000, description="光标附近截取的内容（前端已截断，前 1200 + 后 300）")
+    cursor_position: int = Field(0, ge=0, description="光标位置（字符偏移量）")
+    title: Optional[str] = Field(None, max_length=200, description="笔记标题（提供上下文）")
+
+
+class AutocompleteResponse(BaseModel):
+    """AI 内联补全响应"""
+    completion: str = Field(..., description="补全文本（空串表示无建议）")
+    model: str = Field("", description="使用的模型名称（前端调试用）")
+    latency_ms: int = Field(0, description="推理延迟毫秒（前端性能监控）")
 
 
 class WriteAssistantRequest(BaseModel):
     """AI 写作辅助请求"""
-    content: str = Field(..., description="笔记内容")
-    mode: str = Field("continue", description="模式：continue(续写) / expand(扩写) / summary(摘要)")
+    content: str = Field(..., max_length=8000, description="笔记内容（超长后端按 WRITE_ASSIST_MAX_CONTENT_CHARS 截断）")
+    mode: Literal["continue", "expand", "summary"] = Field(
+        "continue", description="模式：continue(续写) / expand(扩写) / summary(摘要)"
+    )
+    title: Optional[str] = Field(None, max_length=200, description="笔记标题（提供上下文）")
+
+
+class WriteAssistantResponse(BaseModel):
+    """AI 写作辅助响应"""
+    result: str = Field("", description="生成结果（空串表示失败或无内容）")
+    model: str = Field("", description="使用的模型名称（前端调试用）")
+    latency_ms: int = Field(0, description="推理延迟毫秒")
 
 
 class BatchOperation(BaseModel):

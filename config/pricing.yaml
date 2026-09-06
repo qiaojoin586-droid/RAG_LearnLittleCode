@@ -19,3 +19,8 @@ models:
   qwen3.7-flash-2026-07-15:
     input_price_per_1k: 0.0003
     output_price_per_1k: 0.0006
+  # AI 联机补全专用（AUTOCOMPLETE_MODEL，独立于分类/Plan 模型）
+  # ⚠️ 占位值：与 qwen3.7-flash 同档，待按百炼官网实际单价核实后更新
+  qwen3.8-flash:
+    input_price_per_1k: 0.0003
+    output_price_per_1k: 0.0006
