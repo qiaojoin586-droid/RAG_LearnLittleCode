@@ -19,6 +19,8 @@ import remarkGfm from 'remark-gfm';
 import rehypeHighlight from 'rehype-highlight';
 import 'highlight.js/styles/github.css';
 import { notesApi } from '../api/notes';
+import { useAutocomplete } from '../hooks/useAutocomplete';
+import { GhostTextArea } from '../components/GhostTextArea';
 import TagInput from '../components/common/TagInput';
 import { useCategoryStore } from '../stores/useCategoryStore';
 import { flattenCategories } from '../types/category';
@@ -113,10 +115,161 @@ export default function NoteEditor({ note, initialFormat, onCreated, onUpdated, 
     toast.success('导出成功');
   };
 
+  // ===== AI 联机补全（薄片：建议条 + Tab 采纳，暂不做内联覆盖层）=====
+  // 设计文档：docs/AI联机补全功能设计优化方案.md §4
+  const isMobile = typeof window !== 'undefined' && window.innerWidth < 768;
+  const autocomplete = useAutocomplete({
+    debounceMs: 600,
+    enabled: !isTxt && !isMobile,   // MVP 仅桌面 md 模式启用（txt / 移动端第二阶段）
+  });
+
+  // ===== AI 写作辅助（续写 / 扩写 / 摘要，用户主动触发）=====
+  const [aiLoading, setAiLoading] = useState(false);
+  const [aiResult, setAiResult] = useState('');
+
+  /** 内容变化：触发补全（有选区时不触发，§5.4） */
+  const handleContentChange = useCallback((e: React.ChangeEvent<HTMLTextAreaElement>) => {
+    const newContent = e.target.value;
+    setContent(newContent);
+
+    if (e.target.selectionStart !== e.target.selectionEnd) {
+      autocomplete.dismiss();
+      return;
+    }
+    const cursor = e.target.selectionStart;
+    // F8：后端只用到光标前 800 字符（AUTOCOMPLETE_MAX_CONTEXT），
+    // 前端多传无益，这里与后端口径对齐，减少约 30% 请求体
+    const before = newContent.slice(Math.max(0, cursor - 800), cursor);
+    const after = newContent.slice(cursor, cursor + 300);
+    autocomplete.onContentChange(before + after, before.length, cursor, title);
+  }, [autocomplete, title]);
+
+  /** 采纳建议：插入到请求时的光标位置（而非追加到末尾） */
+  const handleAccept = useCallback(() => {
+    const { text, cursorPosition: pos } = autocomplete.accept();
+    if (!text) return;
+    setContent(prev => prev.slice(0, pos) + text + prev.slice(pos));
+    requestAnimationFrame(() => {
+      const ta = textareaRef.current;
+      if (!ta) return;
+      ta.focus();
+      const newPos = pos + text.length;
+      ta.setSelectionRange(newPos, newPos);
+    });
+  }, [autocomplete]);
+
+  /** 按键：Tab 采纳 / Esc 丢弃 / 其它按键丢弃（IME 组合期间一律放行） */
+  const handleEditorKeyDown = useCallback((e: React.KeyboardEvent<HTMLTextAreaElement>) => {
+    if (e.nativeEvent.isComposing) return;   // 中文输入法选词/取消候选不能被拦截
+    if (e.key === 'Tab' && autocomplete.completion) {
+      e.preventDefault();
+      handleAccept();
+    } else if (e.key === 'Escape' && autocomplete.completion) {
+      e.preventDefault();
+      autocomplete.dismiss();
+    } else if (e.key !== 'Tab') {
+      autocomplete.dismiss();   // 继续输入 / 光标移动 → 上下文已变，丢弃
+    }
+  }, [autocomplete, handleAccept]);
+
+  /** 触发 AI 写作辅助（结果先预览，用户确认后才插入，非破坏性） */
+  const handleAiWrite = useCallback(async (mode: 'continue' | 'expand' | 'summary') => {
+    if (aiLoading) return;
+    setAiResult('');
+    setAiLoading(true);
+    try {
+      const res = await notesApi.writeAssistant({ content, mode, title });
+      const data = res.data.data;
+      if (data.result) {
+        setAiResult(data.result);
+      } else {
+        toast.error(t('note.ai.failed'));
+      }
+    } catch {
+      toast.error(t('note.ai.failed'));
+    } finally {
+      setAiLoading(false);
+    }
+  }, [content, title, aiLoading, t]);
+
+  /** 采纳 AI 结果：插入到光标处（不覆盖原文，可 Ctrl+Z 前手动撤销） */
+  const handleAiAccept = useCallback(() => {
+    const text = aiResult;
+    if (!text) return;
+    const ta = textareaRef.current;
+    const pos = ta ? ta.selectionStart : content.length;
+    setContent(prev => prev.slice(0, pos) + text + prev.slice(pos));
+    setAiResult('');
+    requestAnimationFrame(() => {
+      const el = textareaRef.current;
+      if (!el) return;
+      el.focus();
+      const newPos = pos + text.length;
+      el.setSelectionRange(newPos, newPos);
+    });
+  }, [aiResult, content.length]);
+
+  /** AI 写作辅助按钮组（md / txt 两个工具栏共用） */
+  const renderAiWriteButtons = () => (
+    <div className="flex items-center gap-0.5 ml-1 pl-1 border-l border-[var(--color-border)]">
+      {(['continue', 'expand', 'summary'] as const).map((m) => (
+        <button
+          key={m}
+          type="button"
+          disabled={aiLoading}
+          onClick={() => handleAiWrite(m)}
+          className="px-1.5 py-1 rounded-lg text-xs text-[var(--color-text-secondary)] hover:bg-[var(--color-accent-bg)] hover:text-[var(--color-accent)] disabled:opacity-40 transition-all duration-200"
+        >
+          {t(`note.ai.${m}`)}
+        </button>
+      ))}
+    </div>
+  );
+
+  /** AI 结果预览条（生成中 / 待采纳） */
+  const renderAiResultBar = () => {
+    if (!aiLoading && !aiResult) return null;
+    return (
+      <div className="shrink-0 border-t border-[var(--color-border)] bg-[var(--color-surface-alt)] px-3 py-2">
+        {aiLoading ? (
+          <div className="text-xs text-[var(--color-text-tertiary)]">{t('note.ai.loading')}</div>
+        ) : (
+          <>
+            <div className="flex items-center gap-2 mb-1">
+              <span className="text-xs text-[var(--color-text-tertiary)]">{t('note.ai.result')}</span>
+              <div className="ml-auto flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={handleAiAccept}
+                  className="text-xs text-[#1677ff] hover:underline"
+                >
+                  {t('note.ai.accept')}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setAiResult('')}
+                  className="text-xs text-[var(--color-text-tertiary)] hover:underline"
+                >
+                  {t('note.ai.discard')}
+                </button>
+              </div>
+            </div>
+            <div className="max-h-40 overflow-y-auto whitespace-pre-wrap text-sm text-[var(--color-text)]">
+              {aiResult}
+            </div>
+          </>
+        )}
+      </div>
+    );
+  };
+
   /** 向 textarea 插入/包裹选中文本 */
   const wrapSelection = useCallback((before: string, after: string = before) => {
     const ta = textareaRef.current;
     if (!ta) return;
+    // ★ F3：工具栏直接 setContent 绕过 onChange → 已显示的补全建议的插入点会失效，
+    // 此时按 Tab 会插到错误位置，必须先丢弃。
+    autocomplete.dismiss();
     const start = ta.selectionStart;
     const end = ta.selectionEnd;
     const selected = content.substring(start, end);
@@ -128,12 +281,13 @@ export default function NoteEditor({ note, initialFormat, onCreated, onUpdated, 
       const cursorPos = start + before.length;
       ta.setSelectionRange(cursorPos, cursorPos + (selected || '文本').length);
     });
-  }, [content]);
+  }, [content, autocomplete]);
 
   /** 在行首插入前缀 */
   const prefixLine = useCallback((prefix: string) => {
     const ta = textareaRef.current;
     if (!ta) return;
+    autocomplete.dismiss();   // ★ F3：同 wrapSelection，避免陈旧插入点
     const start = ta.selectionStart;
     // 找到当前行的起始位置
     const lineStart = content.lastIndexOf('\n', start - 1) + 1;
@@ -143,7 +297,7 @@ export default function NoteEditor({ note, initialFormat, onCreated, onUpdated, 
       ta.focus();
       ta.setSelectionRange(start + prefix.length, start + prefix.length);
     });
-  }, [content]);
+  }, [content, autocomplete]);
 
   /** 工具栏按钮配置 */
   const toolbarActions = [
@@ -239,7 +393,8 @@ export default function NoteEditor({ note, initialFormat, onCreated, onUpdated, 
       <div className="flex-1 min-h-[300px] border border-[var(--color-border)] rounded-xl bg-[var(--color-card)] overflow-hidden shadow-[var(--shadow-card)] flex flex-col">
         {/* 工具栏：仅 Markdown 模式显示；纯文本模式仅显示类型标签 */}
         {isTxt ? (
-          <div className="flex items-center justify-end px-2 py-1.5 border-b border-[var(--color-border)] bg-[var(--color-surface)] shrink-0">
+          <div className="flex items-center justify-end gap-2 px-2 py-1.5 border-b border-[var(--color-border)] bg-[var(--color-surface)] shrink-0">
+            {renderAiWriteButtons()}
             <span className="text-xs text-[var(--color-text-tertiary)] select-none">{t('note.format.txt')}</span>
           </div>
         ) : (
@@ -261,6 +416,7 @@ export default function NoteEditor({ note, initialFormat, onCreated, onUpdated, 
           )}
           {/* 模式切换 + 标签 */}
           <div className="ml-auto flex items-center gap-1">
+            {renderAiWriteButtons()}
             <div className="flex items-center rounded-lg border border-[var(--color-border)] overflow-hidden">
               <button
                 type="button"
@@ -307,13 +463,19 @@ export default function NoteEditor({ note, initialFormat, onCreated, onUpdated, 
         {/* 内容区域（flex-1 填充，替代原 calc(100vh-380px) 视口高度） */}
         {isTxt ? (
           /* 纯文本模式：单栏 textarea，无预览、无语法工具栏 */
-          <textarea
-            ref={textareaRef}
+          <GhostTextArea
+            textareaRef={textareaRef}
             value={content}
-            onChange={(e) => setContent(e.target.value)}
+            onChange={handleContentChange}
+            onKeyDown={handleEditorKeyDown}
+            onInteract={autocomplete.dismiss}
+            completion={autocomplete.completion}
+            isLoading={autocomplete.isLoading}
+            ghostAt={autocomplete.anchor}
+            enabled={false}
+            mono={false}
             placeholder={t('note.content')}
-            className="flex-1 w-full resize-none p-4 text-sm leading-relaxed text-[var(--color-text)] bg-transparent outline-none min-h-0"
-            spellCheck={false}
+            className="flex-1 w-full min-h-0"
           />
         ) : (
         <div className="flex flex-1 min-h-0">
@@ -327,13 +489,19 @@ export default function NoteEditor({ note, initialFormat, onCreated, onUpdated, 
                   编辑
                 </div>
               )}
-              <textarea
-                ref={textareaRef}
+              <GhostTextArea
+                textareaRef={textareaRef}
                 value={content}
-                onChange={(e) => setContent(e.target.value)}
+                onChange={handleContentChange}
+                onKeyDown={handleEditorKeyDown}
+                onInteract={autocomplete.dismiss}
+                completion={autocomplete.completion}
+                isLoading={autocomplete.isLoading}
+                ghostAt={autocomplete.anchor}
+                enabled={!isMobile}
+                mono
                 placeholder={t('note.content')}
-                className="flex-1 w-full resize-none p-4 text-sm leading-relaxed text-[var(--color-text)] bg-transparent outline-none font-[var(--font-mono)] min-h-0"
-                spellCheck={false}
+                className="flex-1 w-full min-h-0"
               />
             </div>
           )}
@@ -367,6 +535,8 @@ export default function NoteEditor({ note, initialFormat, onCreated, onUpdated, 
           )}
         </div>
         )}
+
+        {renderAiResultBar()}
       </div>
     </div>
   );

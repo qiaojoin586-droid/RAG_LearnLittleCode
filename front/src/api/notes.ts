@@ -9,6 +9,8 @@ import { endpoints } from './endpoints';
 import type {
   ApiResponse, Note, NoteCreate, NoteUpdate, NoteListResponse,
   NoteSearchRequest, NoteSearchResult, BatchOperation, DeletedNoteListResponse,
+  AutocompleteRequest, AutocompleteResponse,
+  WriteAssistantRequest, WriteAssistantResponse,
 } from '../types/api';
 
 export const notesApi = {
@@ -60,11 +62,25 @@ export const notesApi = {
   batch: (data: BatchOperation) =>
     client.post<ApiResponse<null>>(endpoints.note.batch, data),
 
-  /** AI 内联补全 */
-  autocomplete: (data: { content: string; cursor_position?: number }) =>
-    client.post<ApiResponse<{ completion: string }>>(endpoints.note.autocomplete, data),
+  /** AI 内联补全（config.signal 用于取消上一次未完成请求；5s 超时对齐后端 request_timeout） */
+  autocomplete: (
+    data: AutocompleteRequest,
+    config?: { signal?: AbortSignal },
+  ) =>
+    client.post<ApiResponse<AutocompleteResponse>>(
+      endpoints.note.autocomplete,
+      data,
+      { timeout: 5000, ...config },   // ★ F4：全局 axios 30s，补全必须 5s 内失败
+    ),
 
-  /** AI 写作辅助 */
-  writeAssistant: (data: { content: string; mode?: string }) =>
-    client.post<ApiResponse<{ result: string }>>(endpoints.note.writeAssistant, data),
+  /** AI 写作辅助（续写/扩写/摘要；主模型推理较慢，单独放宽超时到 60s） */
+  writeAssistant: (
+    data: WriteAssistantRequest,
+    config?: { signal?: AbortSignal },
+  ) =>
+    client.post<ApiResponse<WriteAssistantResponse>>(
+      endpoints.note.writeAssistant,
+      data,
+      { timeout: 60000, ...config },
+    ),
 };

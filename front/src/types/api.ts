@@ -178,6 +178,34 @@ export interface BatchOperation {
   target_category_id?: string;
 }
 
+/** AI 内联补全请求（content 为光标附近截取的内容，前 1200 + 后 300） */
+export interface AutocompleteRequest {
+  content: string;
+  cursor_position?: number;
+  title?: string;
+}
+
+/** AI 内联补全响应 */
+export interface AutocompleteResponse {
+  completion: string;
+  model: string;
+  latency_ms: number;
+}
+
+/** AI 写作辅助请求（续写 / 扩写 / 摘要） */
+export interface WriteAssistantRequest {
+  content: string;
+  mode?: 'continue' | 'expand' | 'summary';
+  title?: string;
+}
+
+/** AI 写作辅助响应 */
+export interface WriteAssistantResponse {
+  result: string;
+  model: string;
+  latency_ms: number;
+}
+
 // ========== 聊天 ==========
 
 /** 聊天附件元数据（对应后端 AttachmentMeta） */
@@ -297,6 +325,51 @@ export interface ReviewStats {
   completed_today: number;
   pending_today: number;
   streak_days: number;
+}
+
+/** AI 生成的复习题 */
+export interface ReviewQuestion {
+  question: string;
+  answer: string;
+}
+
+/** AI 复习题响应 */
+export interface ReviewQuestionsResponse {
+  questions: ReviewQuestion[];
+  model: string;
+  latency_ms: number;
+  /** 是否命中 6h 缓存 */
+  cached: boolean;
+}
+
+// ========== 用量与费用 ==========
+
+/** 按阶段聚合的调用统计（不含费用，费用按模型算） */
+export interface UsageStageStat {
+  stage: string;
+  calls: number;
+  prompt_tokens: number;
+  completion_tokens: number;
+}
+
+/** 按模型聚合的调用与费用 */
+export interface UsageModelStat {
+  model: string;
+  calls: number;
+  cost_cny: number;
+}
+
+/** 模型调用用量与费用汇总（GET /usage/summary） */
+export interface UsageSummary {
+  days: number;
+  total_calls: number;
+  total_prompt_tokens: number;
+  total_completion_tokens: number;
+  total_tokens: number;
+  total_cost_cny: number;
+  avg_latency_ms: number;
+  by_stage: UsageStageStat[];
+  by_model: UsageModelStat[];
 }
 
 // ========== 模板 ==========
