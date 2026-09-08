@@ -12,6 +12,10 @@
 """
 
 import asyncio
+import json
+import os
+import re
+import time
 import uuid
 
 from typing import List, Optional, Tuple
@@ -32,6 +36,21 @@ from app.schemas.note import NoteCreate, NoteUpdate
 # GET /note?category_id=__uncategorized__ → WHERE category_id IS NULL
 UNCATEGORIZED_SENTINEL = "__uncategorized__"
 
+# AI 联机补全后处理的引号集合（半角 + 中文弯引号）# ⚠️ 必须放在模块级：行内写成 ('"', "'", '"', ''') 会被 Python 解析为三引号字符串，
+#    吞掉后续的 `and text[-1] in (...)`，导致"只剥首字符"的静默逻辑错误
+#    （设计文档 §3.6 的 C3，AST 实测可复现）。
+# F11：按"左引号 → 右引号"映射判定，必须首尾成对才剥离（避免 `"abc'` 被误剥）。
+_QUOTE_PAIRS = {'"': '"', "'": "'", "“": "”", "‘": "’"}
+# 兼容：全部引号字符（含右引号），供测试与外部引用
+_QUOTE_CHARS = frozenset('"\'' + '“”‘’')
+
+# AI 写作辅助模式 → 提示词中的模式说明
+_WRITE_MODES = {
+    "continue": "续写——紧接笔记末尾继续写，保持风格与主题一致，写 2-4 句",
+    "expand": "扩写——在保留原意的前提下把内容写得更详细具体，可补充细节或例子",
+    "summary": "摘要——用 2-3 句话概括笔记的核心内容",
+}
+
 
 class NoteService:
     """
@@ -43,16 +62,18 @@ class NoteService:
     - 语义搜索：ChromaDB 检索 → 提取 note_id → MySQL 回填完整数据
     """
     
-    def __init__(self, vector_store=None, chat_model=None):
+    def __init__(self, vector_store=None, chat_model=None, autocomplete_model=None):
         """
         初始化笔记服务
         
         Args:
             vector_store: 向量存储服务实例（ChromaDB）
             chat_model: LLM Chat 模型实例（用于自动标签生成）
+            autocomplete_model: AI 联机补全专用模型（轻量，None = 功能关闭）
         """
         self.vector_store = vector_store
         self.chat_model = chat_model
+        self.autocomplete_model = autocomplete_model
     
     async def create_note(
         self, db: AsyncSession, user_id: str, note_data: NoteCreate
@@ -806,8 +827,12 @@ class NoteService:
             note: 笔记对象
         """
         try:
-            # TODO: 调用 LLM 生成标签和分类
-            # 创建回顾记录（艾宾浩斯遗忘曲线）
+            # 1. AI 自动标签（失败/超时静默跳过，标签是增强不是关卡）
+            tags = await self._generate_auto_tags(note)
+            if tags:
+                await self._persist_note_tags(note.id, tags)
+
+            # 2. 创建回顾记录（艾宾浩斯遗忘曲线）
             from app.db.database import async_session_factory
             
             async with async_session_factory() as new_session:
@@ -821,8 +846,324 @@ class NoteService:
                 new_session.add(review)
                 await new_session.commit()
                 
-            logger.info(f"自动标签和回顾记录创建完成: note_id={note.id}")
+            logger.info(f"自动标签和回顾记录创建完成: note_id={note.id}, tags={tags}")
             
         except Exception as e:
             logger.error(f"自动标签任务失败: note_id={note.id}, error={e}")
+
+    async def _generate_auto_tags(self, note: Note) -> list:
+        """
+        调用 LLM 生成标签（**不写库**，返回标签列表；任何跳过/失败返回 []）
+
+        跳过条件：
+        - `AUTO_TAG_ENABLED=false`
+        - 未注入 chat_model
+        - 笔记已有标签（不覆盖用户手工标签）
+        - 正文过短（< 50 字符，多为草稿/占位）
+
+        设计要点：
+        - 正文截断至 `AUTO_TAG_MAX_CONTENT_CHARS`（默认 1200），控制成本
+        - 后台任务无请求上下文 → 显式 set_trace_context(user_id)，否则
+          model_traces.user_id 为空、按用户聚合的费用看不到这次调用
+        - 提示词要求"分类类别全部设置为未分类"，故**只取 tags、忽略 category**
+        """
+        from app.core.model_trace import (
+            clear_trace_context, new_request_id, set_trace_context,
+        )
+        from app.utils.prompt_loader import format_prompt
+
+        if os.getenv("AUTO_TAG_ENABLED", "true").strip().lower() != "true":
+            return []
+        if self.chat_model is None:
+            return []
+        if note.tags:  # 用户已设置标签 → 不覆盖
+            return []
+
+        content = (note.content or "").strip()
+        if len(content) < 50:
+            return []
+
+        max_chars = int(os.getenv("AUTO_TAG_MAX_CONTENT_CHARS", "1200"))
+        try:
+            prompt = format_prompt(
+                "auto_tag",
+                note_title=note.title or "无标题",
+                note_content=content[:max_chars],
+            )
+        except (FileNotFoundError, KeyError) as e:
+            logger.warning(f"自动标签 prompt 加载失败: {e}")
+            return []
+
+        set_trace_context(new_request_id(), user_id=note.user_id, stage="auto_tag")
+        try:
+            async with asyncio.timeout(30):
+                response = await self.chat_model.ainvoke([
+                    ("system", "你是笔记标签助手，只输出 JSON，不要任何解释。"),
+                    ("user", prompt),
+                ])
+            raw = response.content if isinstance(response.content, str) else ""
+        except Exception as e:
+            logger.warning(f"自动标签调用失败: note_id={note.id}, {type(e).__name__}: {e}")
+            return []
+        finally:
+            clear_trace_context()
+
+        return self._parse_auto_tags(raw)
+
+    @staticmethod
+    def _parse_auto_tags(raw: str) -> list:
+        """
+        解析 LLM 返回的标签 JSON（纯函数，容错优先）
+
+        容错：剥 ``` 代码围栏 → 直接 json.loads；失败则取首个 {...} 再试；
+        过滤非字符串/空白/超长（> 20 字符）标签，去重，最多 5 个。
+        """
+        text = re.sub(r"```(?:json)?\s*", "", raw or "").replace("```", "").strip()
+        if not text:
+            return []
+
+        data = None
+        try:
+            data = json.loads(text)
+        except json.JSONDecodeError:
+            match = re.search(r"\{.*\}", text, re.S)
+            if match:
+                try:
+                    data = json.loads(match.group(0))
+                except json.JSONDecodeError:
+                    return []
+
+        if not isinstance(data, dict):
+            return []
+        raw_tags = data.get("tags")
+        if not isinstance(raw_tags, list):
+            return []
+
+        tags: list = []
+        for item in raw_tags:
+            if not isinstance(item, str):
+                continue
+            tag = item.strip().strip('"').strip()
+            if not tag or len(tag) > 20 or tag in tags:
+                continue
+            tags.append(tag)
+        return tags[:5]
+
+    async def _persist_note_tags(self, note_id: str, tags: list) -> None:
+        """把生成的标签写回 notes 表（独立会话 + 直接 UPDATE，避免用已关闭 session 的 ORM 对象）"""
+        from app.db.database import async_session_factory
+
+        async with async_session_factory() as db:
+            await db.execute(update(Note).where(Note.id == note_id).values(tags=tags))
+            await db.commit()
+        logger.info(f"自动标签写回完成: note_id={note_id}, tags={tags}")
+
+    # ==================== AI 联机补全 ====================
+    # 设计文档：docs/AI联机补全功能设计优化方案.md §3.6
+
+    async def ai_autocomplete(
+        self, content: str, cursor_position: int, title: str = ""
+    ) -> dict:
+        """
+        AI 内联补全
+
+        流程：
+        1. 截取光标前 ≤ 800 + 光标后 ≤ 300 字符（N2：FIM 式 prefix/suffix）
+        2. 加载 autocomplete prompt 并填充
+        3. 调用轻量 LLM 生成补全
+        4. 后处理：去除引号/多行解释，截断至 200 字符
+
+        Args:
+            content: 前端已截取的光标附近内容（前 1200 + 后 300 字符，I4）
+            cursor_position: 光标位置（在截取内容中的偏移量）
+            title: 笔记标题（提供上下文）
+
+        Returns:
+            {"completion": str, "model": str, "latency_ms": int}
+            任何失败（未配置模型 / 模板缺失 / 调用异常）均返回空补全，不抛异常
+        """
+        from app.core.model_trace import set_trace_stage
+        from app.utils.prompt_loader import format_prompt
+
+        empty = {"completion": "", "model": "", "latency_ms": 0}
+
+        if not self.autocomplete_model:
+            return empty
+
+        # 1. 截取上下文（N2：分别截取光标前后，供 FIM prompt 使用）
+        # F9：上下文与补全长度上限改为可配（此前硬编码在代码里）
+        max_before = int(os.getenv("AUTOCOMPLETE_MAX_CONTEXT", "800"))
+        context_before, context_after = self._truncate_context(
+            content, cursor_position, max_before=max_before
+        )
+        if len(context_before.strip()) < 10:
+            return empty
+
+        # 2. 构建 prompt（C7：模板文件缺失 / prompt.yaml 未配置时降级，而非 500）
+        try:
+            prompt = format_prompt(
+                "autocomplete",
+                title=title or "无标题",
+                context_before=context_before,
+                context_after=context_after or "（无）",
+            )
+        except (FileNotFoundError, KeyError) as e:
+            logger.error(f"补全 prompt 模板加载失败: {e}")
+            return empty
+
+        # 3. 调用 LLM（失败静默降级，不打断用户输入）
+        set_trace_stage("autocomplete")
+        start = time.monotonic()
+        try:
+            response = await self.autocomplete_model.ainvoke([
+                ("system", "你是一个笔记续写助手，直接输出续写内容。"),
+                ("user", prompt),
+            ])
+            latency_ms = int((time.monotonic() - start) * 1000)
+            raw_text = (
+                response.content
+                if isinstance(response.content, str)
+                else str(response.content or "")
+            )
+        except Exception as e:
+            logger.warning(f"AI 补全调用失败: {e}")
+            return empty
+
+        # 4. 后处理（F9：字符上限可配，默认 200）
+        max_len = int(os.getenv("AUTOCOMPLETE_MAX_COMPLETION", "200"))
+        completion = self._postprocess_completion(raw_text, max_len=max_len)
+        model_name = getattr(self.autocomplete_model, "model_name", "") or ""
+
+        return {"completion": completion, "model": model_name, "latency_ms": latency_ms}
+
+    def _truncate_context(
+        self, content: str, cursor_position: int,
+        max_before: int = 800, max_after: int = 300,
+    ) -> tuple:
+        """
+        截取光标前后上下文（N2：返回 (before, after) 用于 FIM prompt）
+
+        Returns:
+            (context_before, context_after)
+            - context_before: 光标前 ≤ max_before 字符，优先段落边界截断
+            - context_after:  光标后 ≤ max_after 字符
+        """
+        # 光标前：截取 + 段落边界优先
+        before = content[:cursor_position]
+        if len(before) > max_before:
+            truncated = before[-max_before:]
+            para_start = truncated.rfind("\n\n")
+            if para_start > max_before // 2:  # 至少保留一半内容才用段落边界
+                before = truncated[para_start + 2:]
+            else:
+                before = truncated
+
+        # 光标后：直接截取 max_after 字符
+        after = content[cursor_position:cursor_position + max_after]
+
+        return before, after
+
+    def _postprocess_completion(self, text: str, max_len: int = 200) -> str:
+        """
+        后处理模型输出：
+        - 去除成对的首尾引号（模型常加 "" / '' / “”）
+        - 只取第一行（避免模型输出多段解释）
+        - 截断至 max_len（CJK 无空格时直接按字符截断）
+
+        ⚠️ C3：引号集合必须用模块级 `_QUOTE_CHARS` 常量，禁止行内元组字面量
+        """
+        text = (text or "").strip()
+
+        # 去除成对首尾引号（★ C3 修复 + F11：必须首尾成对匹配，
+        # 避免 `"abc'` 这类单侧引号被误剥）
+        if len(text) >= 2 and _QUOTE_PAIRS.get(text[0]) == text[-1]:
+            text = text[1:-1].strip()
+
+        # 只取第一行（避免模型输出多段解释）
+        text = text.split("\n")[0].strip()
+
+        # 截断（CJK 无空格，rsplit 找不到空格时返回原串，不会误截）
+        if len(text) > max_len:
+            head = text[:max_len]
+            text = head.rsplit(" ", 1)[0] if " " in head else head
+
+        return text
+
+    # ==================== AI 写作辅助（续写 / 扩写 / 摘要） ====================
+
+    async def ai_write_assist(
+        self, content: str, mode: str = "continue", title: str = ""
+    ) -> dict:
+        """
+        AI 写作辅助（用户主动触发，非高频）
+
+        Args:
+            content: 笔记内容（超长按 WRITE_ASSIST_MAX_CONTENT_CHARS 截断）
+            mode: continue(续写) / expand(扩写) / summary(摘要)
+            title: 笔记标题（提供上下文）
+
+        Returns:
+            {"result": str, "model": str, "latency_ms": int}
+            未配置模型 / 内容过短 / 调用失败均返回空 result，不抛异常
+        """
+        from app.core.model_trace import set_trace_stage
+        from app.utils.prompt_loader import format_prompt
+
+        empty = {"result": "", "model": "", "latency_ms": 0}
+
+        if self.chat_model is None:
+            return empty
+
+        text = (content or "").strip()
+        if len(text) < 10:
+            return empty
+
+        mode_desc = _WRITE_MODES.get(mode, _WRITE_MODES["continue"])
+        max_chars = int(os.getenv("WRITE_ASSIST_MAX_CONTENT_CHARS", "3000"))
+
+        try:
+            prompt = format_prompt(
+                "write_assistant",
+                mode_desc=mode_desc,
+                title=title or "无标题",
+                content=text[:max_chars],
+            )
+        except (FileNotFoundError, KeyError) as e:
+            logger.error(f"写作辅助 prompt 加载失败: {e}")
+            return empty
+
+        set_trace_stage("write_assistant")
+        start = time.monotonic()
+        try:
+            async with asyncio.timeout(float(os.getenv("WRITE_ASSIST_TIMEOUT", "60"))):
+                response = await self.chat_model.ainvoke([
+                    ("system", "你是笔记写作助手，只输出结果正文，不要任何解释。"),
+                    ("user", prompt),
+                ])
+            latency_ms = int((time.monotonic() - start) * 1000)
+            raw = response.content if isinstance(response.content, str) else ""
+        except Exception as e:
+            logger.warning(f"写作辅助调用失败: {type(e).__name__}: {e}")
+            return empty
+
+        max_len = int(os.getenv("WRITE_ASSIST_MAX_COMPLETION", "1200"))
+        result = self._postprocess_write_result(raw, max_len=max_len)
+        model_name = getattr(self.chat_model, "model_name", "") or ""
+
+        return {"result": result, "model": model_name, "latency_ms": latency_ms}
+
+    @staticmethod
+    def _postprocess_write_result(text: str, max_len: int = 1200) -> str:
+        """
+        写作辅助输出后处理（与补全不同：**保留换行**，多段内容是正常输出）
+
+        - 去除成对首尾引号
+        - 截断至 max_len（保留段落结构，仅在超长时硬截）
+        """
+        text = (text or "").strip()
+        if len(text) >= 2 and _QUOTE_PAIRS.get(text[0]) == text[-1]:
+            text = text[1:-1].strip()
+        if len(text) > max_len:
+            text = text[:max_len].rstrip()
+        return text
 

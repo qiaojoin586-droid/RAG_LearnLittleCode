@@ -348,9 +348,37 @@ class ModelTraceCallbackHandler(BaseCallbackHandler):
         start = self._started.pop(key, None)
         latency_ms = round((time.monotonic() - start) * 1000) if start else None
         model = self._models.pop(key, "unknown")
+        usage = self._extract_usage(response)
+        self._snapshot(model=model, success=True, usage=usage, latency_ms=latency_ms)
+
+    @staticmethod
+    def _extract_usage(response) -> dict:
+        """
+        提取 token 用量（纯函数，便于单测）
+
+        优先 `llm_output.token_usage`；为空时回退到消息的 `usage_metadata`。
+        后者覆盖"模型 streaming=True 时 ainvoke 实际走 agenerate_from_stream"的场景
+        ——此时 llm_output 不含 token_usage，此前会导致成本恒为 0
+        （README「已知限制：流式 Token 统计」）。
+        """
         llm_output = getattr(response, "llm_output", None) or {}
         usage = llm_output.get("token_usage") or {}
-        self._snapshot(model=model, success=True, usage=usage, latency_ms=latency_ms)
+        if usage:
+            return usage
+
+        try:
+            message = response.generations[0][0].message
+        except (AttributeError, IndexError, TypeError):
+            return {}
+
+        meta = getattr(message, "usage_metadata", None) or {}
+        if not meta:
+            return {}
+        return {
+            "prompt_tokens": meta.get("input_tokens"),
+            "completion_tokens": meta.get("output_tokens"),
+            "total_tokens": meta.get("total_tokens"),
+        }
 
     def on_llm_error(self, error: Exception, **kwargs) -> None:
         key = self._run_key(kwargs)

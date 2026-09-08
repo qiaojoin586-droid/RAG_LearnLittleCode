@@ -11,6 +11,12 @@
 from datetime import datetime, timedelta
 from typing import List, Optional
 
+import asyncio
+import json
+import os
+import re
+import time
+
 from sqlalchemy import select, and_, func
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -20,6 +26,9 @@ from app.models.note import Note
 
 # 艾宾浩斯遗忘曲线间隔（天）
 EBBINGHAUS_INTERVALS = [1, 2, 4, 7, 15, 30]
+
+# 复习题缓存 TTL（秒）：同一笔记内容未变时复用，避免重复计费
+REVIEW_QUESTION_CACHE_TTL = 6 * 3600
 
 
 class ReviewService:
@@ -199,3 +208,166 @@ class ReviewService:
             "completed_today": completed_today,
             "streak_days": streak_days,
         }
+
+    async def generate_questions(
+        self, db: AsyncSession, review_id: int, user_id: str, chat_model=None
+    ) -> dict:
+        """
+        为某条回顾记录对应的笔记生成复习题（LLM）
+
+        流程：校验归属 → 查缓存（6h，key 含 note.updated_at 以随笔记变更失效）
+              → 调 LLM → 解析 JSON → 写缓存
+
+        Args:
+            db: 数据库会话
+            review_id: 回顾记录 ID
+            user_id: 当前用户（归属校验）
+            chat_model: LLM 实例（由路由层从 init_manager 注入，便于测试替换）
+
+        Returns:
+            {"questions": [{"question": str, "answer": str}], "model": str,
+             "latency_ms": int, "cached": bool}
+            任何失败（无模型 / 内容过短 / 调用或解析异常）返回空 questions，不抛异常
+        """
+        from app.core.failed_response import BusinessError, ErrorCode
+
+        empty = {"questions": [], "model": "", "latency_ms": 0, "cached": False}
+
+        result = await db.execute(
+            select(ReviewRecord, Note)
+            .join(Note, ReviewRecord.note_id == Note.id)
+            .where(
+                and_(
+                    ReviewRecord.id == review_id,
+                    ReviewRecord.user_id == user_id,
+                    Note.deleted_at.is_(None),
+                )
+            )
+        )
+        row = result.first()
+        if not row:
+            raise BusinessError(
+                code=ErrorCode.NOTE_NOT_FOUND, message="回顾记录不存在", http_status=404
+            )
+        _review, note = row
+
+        if chat_model is None:
+            return empty
+        return await self._questions_from_note(note, chat_model)
+
+    async def _questions_from_note(self, note, chat_model) -> dict:
+        """
+        出题主体（LLM + 缓存），与 DB 查询解耦以便单测
+
+        Args:
+            note: 具备 id / title / content / updated_at 的对象（ORM 或替身）
+            chat_model: LLM 实例
+        """
+        empty = {"questions": [], "model": "", "latency_ms": 0, "cached": False}
+
+        content = (note.content or "").strip()
+        if len(content) < 50:
+            return empty
+
+        # 缓存键包含 updated_at：笔记内容变化后自动失效
+        cache_key = f"review_q:{note.id}:{int(note.updated_at.timestamp())}"
+        redis = None
+        try:
+            from app.db.redis_client import get_redis
+
+            redis = get_redis()
+            cached = await redis.get(cache_key)
+            if cached:
+                data = json.loads(cached)
+                data["cached"] = True
+                return data
+        except Exception as e:  # 缓存故障不影响生成
+            logger.debug(f"复习题缓存读取跳过: {type(e).__name__}: {e}")
+            redis = None
+
+        from app.core.model_trace import set_trace_stage
+        from app.utils.prompt_loader import format_prompt
+
+        max_chars = int(os.getenv("REVIEW_QUESTION_MAX_CONTENT_CHARS", "2000"))
+        try:
+            prompt = format_prompt(
+                "review_question",
+                title=note.title or "无标题",
+                content=content[:max_chars],
+            )
+        except (FileNotFoundError, KeyError) as e:
+            logger.warning(f"复习题 prompt 加载失败: {e}")
+            return empty
+
+        set_trace_stage("review_question")
+        start = time.monotonic()
+        try:
+            async with asyncio.timeout(30):
+                response = await chat_model.ainvoke([
+                    ("system", "你是复习助手，只输出 JSON，不要任何解释。"),
+                    ("user", prompt),
+                ])
+            latency_ms = int((time.monotonic() - start) * 1000)
+            raw = response.content if isinstance(response.content, str) else ""
+        except Exception as e:
+            logger.warning(f"复习题生成失败: note_id={note.id}, {type(e).__name__}: {e}")
+            return empty
+
+        questions = self._parse_questions(raw)
+        payload = {
+            "questions": questions,
+            "model": getattr(chat_model, "model_name", "") or "",
+            "latency_ms": latency_ms,
+            "cached": False,
+        }
+
+        if questions and redis is not None:
+            try:
+                await redis.set(cache_key, json.dumps(payload, ensure_ascii=False),
+                                ex=REVIEW_QUESTION_CACHE_TTL)
+            except Exception as e:
+                logger.debug(f"复习题缓存写入跳过: {type(e).__name__}: {e}")
+
+        return payload
+
+    @staticmethod
+    def _parse_questions(raw: str) -> list:
+        """
+        解析 LLM 返回的复习题 JSON（纯函数，容错优先）
+
+        兼容 `{"questions": [...]}` 与裸数组两种形态；过滤无问题的条目，最多 3 道。
+        """
+        text = re.sub(r"```(?:json)?\s*", "", raw or "").replace("```", "").strip()
+        if not text:
+            return []
+
+        data = None
+        try:
+            data = json.loads(text)
+        except json.JSONDecodeError:
+            match = re.search(r"[\[{].*[\]}]", text, re.S)
+            if match:
+                try:
+                    data = json.loads(match.group(0))
+                except json.JSONDecodeError:
+                    return []
+
+        if isinstance(data, list):
+            items = data
+        elif isinstance(data, dict):
+            items = data.get("questions")
+        else:
+            items = None
+        if not isinstance(items, list):
+            return []
+
+        questions: list = []
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            question = str(item.get("question") or "").strip()
+            answer = str(item.get("answer") or "").strip()
+            if not question:
+                continue
+            questions.append({"question": question, "answer": answer})
+        return questions[:3]
