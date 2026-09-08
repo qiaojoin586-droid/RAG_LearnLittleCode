@@ -234,10 +234,17 @@ docker compose up -d --build
   .venv/Scripts/python.exe -m alembic revision --autogenerate -m "描述"
   .venv/Scripts/python.exe -m alembic upgrade head
   ```
-- **重排序模型**：容器内需可访问本地模型缓存（默认 `HF_HUB_OFFLINE=1`）。把本机 `~/.cache/huggingface` 拷到 `./huggingface_cache/`（或设置 `HF_CACHE_DIR`），或在构建时 `docker build --build-arg PRELOAD_MODELS=true .`
-- **端口**：`8000` 仅为本机调试暴露，外部流量统一走前端 nginx（80）
+- **重排序模型**：容器内需可访问本地模型缓存（默认 `HF_HUB_OFFLINE=1`）。把本机 `~/.cache/huggingface` 拷到 `./huggingface_cache/`（或设置 `HF_CACHE_DIR`），或在构建时 `docker build --build-arg PRELOAD_MODELS=true .`。缓存挂载到容器 `HF_HOME=/opt/hf-cache`（容器以非 root 运行，不能放在 `/root/.cache`）
+- **前端 nginx 模式**：默认 `front/nginx.conf`（强制 HTTPS，需 `./certs` 证书）。无域名/无证书阶段在 `.env` 设 `NGINX_CONF=nginx.http.conf` 改用纯 HTTP 配置，无需手改文件
+- **端口**：`8000` 仅绑定宿主机 `127.0.0.1`（本机调试用），外部流量统一走前端 nginx（80/443）
+- **目录权限**：容器入口脚本 `scripts/docker-entrypoint.sh` 每次启动自动修正 `data`/`logs`/`media` 属主后降权为 appuser 运行，宿主机无需手工 `chown`
+- **国内构建加速**：在 `.env` 设置 `PIP_INDEX_URL` / `NPM_REGISTRY`（见 `.env.example` 的「Docker 部署」段）
+- **容器日志**：已配置轮转（单文件 10MB × 3），避免小磁盘服务器被日志写满
 - **单进程部署**：多 worker/多实例前需先完成 Redis 化限流、scheduler 去重与 ChromaDB 多进程写冲突改造（见已知限制）
 - **监控**：`/metrics` 暴露 Prometheus 指标（HTTP 计数/耗时）；`/ready` 就绪探针检查后台初始化 + MySQL/Redis 连通性
+
+> 服务器（宝塔 Linux / 2核2G / 无域名）完整部署步骤见 [`docs/宝塔Linux服务器Docker部署方案.md`](docs/宝塔Linux服务器Docker部署方案.md)。
+
 
 ---
 

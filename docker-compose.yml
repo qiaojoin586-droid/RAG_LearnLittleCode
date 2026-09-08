@@ -1,13 +1,31 @@
-# ========== RAG LearnLittle 本地一键部署（Docker Compose） ==========
+# ========== RAG LearnLittle 部署编排（Docker Compose） ==========
 # 用法:
 #   1. cp .env.example .env 并按需配置（JWT_SECRET 必填强随机值）
 #   2. docker compose up -d --build
 #   3. 访问 http://localhost/ （前端，nginx 反代 /api）
 #
 # 说明:
-# - 后端 8000 端口仅暴露给本机（供调试/API 直连）；外部访问统一走前端 nginx
-# - APP_ENV 默认 development（自动创建测试账号）；生产请用 docker-compose.prod.yml 覆盖
-# - 重排序模型: 本地已缓存时挂载 $HOME/.cache/huggingface 卷即可复用
+# - 后端 8000 端口只绑定 127.0.0.1（供本机调试/API 直连）；外部访问统一走前端 nginx
+# - APP_ENV 默认 development（自动创建测试账号）；生产在 .env 里设 APP_ENV=production、
+#   LOG_LEVEL=INFO、LOG_FORMAT=json 即可，**无需额外的 prod compose 文件**
+# - 前端 nginx 模式由 .env 的 NGINX_CONF 决定：
+#     nginx.conf      默认，80 跳 443 + TLS，需 ./certs 下有 fullchain.pem / privkey.pem
+#     nginx.http.conf 无域名/无证书阶段，纯 HTTP，直接可用
+# - 国内服务器构建加速：在 .env 设置 PIP_INDEX_URL / NPM_REGISTRY（见 .env.example）
+# - 需要出网代理（如访问 api.openai.com）时：在 .env 设置 HTTPS_PROXY / NO_PROXY，
+#   env_file 会自动透传进容器（httpx 默认 trust_env=True，代码无需改动）
+# - 容器日志已配置轮转（单文件 10MB × 3），避免小磁盘服务器被日志写满
+# - data/logs 等挂载目录的属主由镜像入口脚本自动修正（scripts/docker-entrypoint.sh），
+#   无需在宿主机手工 chown
+# - 重排序模型缓存卷挂载到容器 /opt/hf-cache（HF_HOME），与容器非 root 用户一致；
+#   2G 内存服务器请保持该目录为空，不要放入模型（详见 docs/宝塔Linux服务器Docker部署方案.md §2.1）
+
+# 统一日志轮转策略（json-file 驱动默认无上限，小磁盘服务器易被写满）
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "3"
 
 services:
   mysql:
@@ -27,6 +45,7 @@ services:
       retries: 10
       start_period: 30s
     restart: unless-stopped
+    logging: *default-logging
 
   redis:
     image: redis:7-alpine
@@ -39,9 +58,19 @@ services:
       timeout: 5s
       retries: 5
     restart: unless-stopped
+    logging: *default-logging
 
   backend:
-    build: .
+    build:
+      context: .
+      args:
+        # 国内服务器构建加速：在 .env 里覆盖这两个值即可
+        PIP_INDEX_URL: ${PIP_INDEX_URL:-https://pypi.org/simple}
+        # 预下载重排序模型（约 1GB）；2G 内存服务器必须保持 false
+        PRELOAD_MODELS: ${PRELOAD_MODELS:-false}
+    # 显式镜像名：避免镜像名随项目目录名变化，保证 docs 里的
+    # `docker save raglearn-backend` / `docker load` 迁移流程可用
+    image: raglearn-backend
     container_name: raglearn-backend
     env_file:
       - .env
@@ -56,20 +85,30 @@ services:
     volumes:
       - ./data:/app/data          # ChromaDB 向量库 + 上传文件（持久化）
       - ./logs:/app/logs          # 日志（持久化）
-      # 重排序模型缓存复用：把本地 ~/.cache/huggingface 拷到 ./huggingface_cache，
-      # 或设置 HF_CACHE_DIR 指向已有缓存目录（避免容器内重复下载 1GB 模型）
-      - ${HF_CACHE_DIR:-./huggingface_cache}:/root/.cache/huggingface
+      # 重排序模型缓存：挂到 /opt/hf-cache（= 镜像 ENV HF_HOME，非 root 可读）。
+      # 复用本机缓存：把 ~/.cache/huggingface 拷到 ./huggingface_cache，或用 HF_CACHE_DIR 指向已有目录。
+      # 2G 内存服务器请留空目录（重排序模型装不下，会自动降级，见部署文档 §2.1）
+      - ${HF_CACHE_DIR:-./huggingface_cache}:/opt/hf-cache
     ports:
-      - "8000:8000"               # 仅本机调试用；生产建议移除，统一走 nginx
+      # 仅绑定回环：本机调试可用，公网无法直连后端（外部统一走前端 nginx 反代）
+      - "127.0.0.1:8000:8000"
     depends_on:
       mysql:
         condition: service_healthy
       redis:
         condition: service_healthy
     restart: unless-stopped
+    logging: *default-logging
 
   frontend:
-    build: ./front
+    build:
+      context: ./front
+      args:
+        # 默认强制 HTTPS（需 ./certs 证书）；无域名阶段在 .env 设 NGINX_CONF=nginx.http.conf
+        NGINX_CONF: ${NGINX_CONF:-nginx.conf}
+        # 国内服务器构建加速：在 .env 里覆盖为 https://registry.npmmirror.com
+        NPM_REGISTRY: ${NPM_REGISTRY:-https://registry.npmjs.org/}
+    image: raglearn-front
     container_name: raglearn-front
     ports:
       - "80:80"
@@ -78,10 +117,12 @@ services:
       # HTTPS 证书（审查高优先级 3）：把 fullchain.pem / privkey.pem 放入 ./certs/
       # 生成自签名示例: openssl req -x509 -newkey rsa:2048 -nodes -keyout certs/privkey.pem -out certs/fullchain.pem -days 365 -subj "/CN=localhost"
       # 生产请使用 Let's Encrypt 等正规证书
+      # 注意: 使用 nginx.http.conf 纯 HTTP 模式时该目录用不到，留空即可
       - ./certs:/etc/nginx/certs:ro
     depends_on:
       - backend
     restart: unless-stopped
+    logging: *default-logging
 
 volumes:
   mysql_data:

@@ -13,6 +13,7 @@ __pycache__
 *.py[cod]
 *.egg-info
 .pytest_cache
+.pytest_tmp
 htmlcov
 .coverage
 
@@ -22,14 +23,24 @@ logs
 media
 backend_*.log
 
-# 前端（后端镜像不需要；前端单独构建）
-front/node_modules
-front/dist
+# 前端（后端镜像不需要；前端单独构建，见 front/Dockerfile + front/.dockerignore）
+front
 
 # IDE
 .idea
 .vscode
 .qoder
+
+# 本地/内部资料（避免打进镜像分发）
+# docs 目录仅在代码注释中被引用，无运行时读取，故整体排除（含设计文档与截图）
+docs
+.workbuddy
+
+# 缓存、证书、镜像导出包（均为宿主机侧产物）
+.cache
+certs
+huggingface_cache
+*.tar.gz
 
 # 临时/调试文件（审查清理项，避免误入镜像）
 *.tmp
