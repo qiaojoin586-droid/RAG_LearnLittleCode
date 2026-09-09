@@ -218,6 +218,16 @@ body {
   background: var(--color-text-tertiary);
 }
 
+/* ========== 认证页密码框：隐藏浏览器自带的眼睛按钮 ========== */
+/* Edge / IE 会在 input[type=password] 内部注入 ::-ms-reveal 显隐按钮，
+   与认证页自定义的眼睛按钮同时出现会变成两个图标。
+   只作用于挂了 .auth-password 的输入框——Settings 等页面的密码框没有自定义按钮，
+   浏览器自带的是它们唯一的显隐入口，不能一并隐藏。 */
+.auth-password::-ms-reveal,
+.auth-password::-ms-clear {
+  display: none;
+}
+
 /* ========== 标题字体 ========== */
 h1, h2, h3, h4, h5, h6 {
   font-family: var(--font-heading);
