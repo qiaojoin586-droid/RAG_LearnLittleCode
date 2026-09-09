@@ -29,6 +29,7 @@ const Profile = lazy(() => import('../pages/Profile'));
 const Settings = lazy(() => import('../pages/Settings'));
 const AboutUs = lazy(() => import('../pages/AboutUs'));
 const PPTTemplates = lazy(() => import('../pages/PPTTemplates'));
+const Usage = lazy(() => import('../pages/Usage'));
 
 /** 包装 Suspense */
 function LazyPage({ children }: { children: React.ReactNode }) {
@@ -117,6 +118,10 @@ export const routes: RouteObject[] = [
       {
         path: '/ppt-templates',
         element: <LazyPage><PPTTemplates /></LazyPage>,
+      },
+      {
+        path: '/usage',
+        element: <LazyPage><Usage /></LazyPage>,
       },
     ],
   },

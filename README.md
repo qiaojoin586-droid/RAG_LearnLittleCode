@@ -66,14 +66,14 @@
 | 🗣️ **语音合成** | Edge TTS 朗读（MP3，按用户目录隔离），对话中直接"朗读 / 读给我听"触发 |
 | 📊 **PPT 生成** | 关键词触发的讲解 PPT 生成（python-pptx 本地渲染，无额外额度）+ PPT 模板管理 +可切换Aspose.Slides Cloud API|
 | 🌍 **外部 API 工具** | DeepL 高质量翻译 · Wolfram Alpha 精确计算 / 解方程 / 单位换算 |
-| 📓 **笔记系统** | Markdown 编辑器（双栏编辑预览 + 语法工具栏）+ **MD / TXT 文档类型**（新建可选，仅新建时可定）+ 笔记模板 + AI 自动补全 / 打标签 |
+| 📓 **笔记系统** | Markdown 编辑器（双栏编辑预览 + 语法工具栏）+ **MD / TXT 文档类型**（新建可选，仅新建时可定）+ 笔记模板 + **AI 光标处内联补全（Tab 采纳）** + **AI 自动打标签（保存后后台生成）** + **AI 写作辅助（续写 / 扩写 / 摘要）** |
 | 🗂️ **分类管理** | 动态分类树（最多 3 级）：拖拽排序 / 移动 / 合并 / 软删除与回收站恢复（级联恢复祖先链），笔记按分类精确过滤 |
 | 🔍 **全局搜索** | 顶栏 Cmd/Ctrl+K 跨笔记 / 会话 / 知识库检索；笔记走 **MySQL 关键词搜索（FULLTEXT ngram 索引 + LIKE 兜底）**，零外部依赖 |
 | 💬 **对话卡片化** | AI 回复中的笔记搜索列表与用户引用的笔记均渲染为可点击卡片（悬浮反馈 + 全文预览弹窗） |
 | 🗑️ **回收站** | 笔记 / 分类双 Tab 回收站，14 天自动彻底清除（定时任务），单条与批量恢复 / 彻底删除 |
 | ✉️ **邮件功能** | QQ 邮箱注册验证，笔记以 Markdown / PDF 导出发送 |
 | 🗜️ **记忆压缩** | 滑动窗口 + 里程碑摘要 + Redis 热缓存的三级对话记忆管理，长对话不丢上下文 |
-| 💰 **Token 用量追踪** | model_trace 输出总线（log / db / langfuse），成本账单 API（前端用量面板开发中） |
+| 💰 **Token 用量追踪** | model_trace 输出总线（log / db / langfuse）+ **前端「用量」面板**（调用数 / Token / 费用 / 平均延迟，按模型与阶段明细，支持今日 / 近 7 天 / 近 30 天） |
 | 🌐 **前端体验** | React 19 + Vite + Tailwind，i18n 国际化，暗 / 亮主题；**三栏式布局**（TopBar + 图标导航 + 分类树 / 列表 / 详情同屏）+ **AI 对话浮层**（480px 右侧滑入，唯一对话入口） |
 | ✅ **黄金评测器** | tests/eval 自动化评测 AI 对话质量（含安全用例） |
 
@@ -256,7 +256,7 @@ docker compose up -d --build
 | 笔记 | `GET /note/recycle-bin` · `POST /note/{id}/restore` · `DELETE /note/{id}/permanent` | 回收站 |
 | 笔记 | `POST /note/search` · `POST /note/autocomplete` · `POST /note/write-assistant` | 语义搜索 / AI 补全 / 写作辅助 |
 | 知识库 | `POST /knowledge/upload`（SSE 进度）· `GET /knowledge/documents` | 文档上传与管理 |
-| 回顾 | `GET /review/today` · `POST /review/{id}/complete` · `GET /review/stats` | 艾宾浩斯回顾 |
+| 回顾 | `GET /review/today` · `POST /review/{id}/complete` · `POST /review/{id}/questions` · `GET /review/stats` | 艾宾浩斯回顾 + **AI 出题（LLM，6h 缓存）** |
 | 模板 | `GET/POST /note-template` · `PUT/DELETE /note-template/{id}` | 笔记模板 |
 | PPT | `GET /ppt/{file_id}` · `POST /ppt-template/upload` · `GET/DELETE /ppt-template` | 下载生成的 PPT / PPT 模板管理 |
 | TTS | `GET /tts/{file_id}` | 下载 TTS 生成的 MP3 音频 |

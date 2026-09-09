@@ -15,7 +15,7 @@ import { useNavigate } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
 import {
   FileText, MessageSquare, BookOpen, Library,
-  Settings, Info, LogOut, Trash2, Presentation,
+  Settings, Info, LogOut, Trash2, Presentation, Coins,
 } from 'lucide-react';
 import { useUserStore } from '../../stores/useUserStore';
 import { authApi } from '../../api/auth';
@@ -54,6 +54,7 @@ const navItems: NavItem[] = [
 ];
 
 const settingItems = [
+  { to: '/usage', icon: Coins, labelKey: 'nav.usage' },
   { to: '/settings', icon: Settings, labelKey: 'nav.settings' },
   { to: '/about', icon: Info, labelKey: 'nav.about' },
 ];

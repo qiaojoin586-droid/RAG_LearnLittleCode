@@ -116,7 +116,14 @@ export const endpoints = {
     today: `${API_PREFIX}/review/today`,
     /** POST 标记回顾完成 */
     complete: (reviewId: number) => `${API_PREFIX}/review/${reviewId}/complete`,
+    /** POST AI 生成回顾问题 */
+    questions: (reviewId: number) => `${API_PREFIX}/review/${reviewId}/questions`,
     stats: `${API_PREFIX}/review/stats`,
+  },
+
+  // ========== 用量与费用 ==========
+  usage: {
+    summary: `${API_PREFIX}/usage/summary`,
   },
 
   // ========== 模板 ==========

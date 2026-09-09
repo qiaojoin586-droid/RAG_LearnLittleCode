@@ -6,7 +6,9 @@
 
 import client from './client';
 import { endpoints } from './endpoints';
-import type { ApiResponse, ReviewRecord, ReviewStats } from '../types/api';
+import type {
+  ApiResponse, ReviewRecord, ReviewStats, ReviewQuestionsResponse,
+} from '../types/api';
 
 export const reviewApi = {
   /** 获取今日待回顾列表 */
@@ -24,4 +26,12 @@ export const reviewApi = {
   /** 获取回顾统计 */
   getStats: () =>
     client.get<ApiResponse<ReviewStats>>(endpoints.review.stats),
+
+  /** AI 生成复习题（LLM，主模型推理较慢，超时放宽到 60s） */
+  generateQuestions: (reviewId: number) =>
+    client.post<ApiResponse<ReviewQuestionsResponse>>(
+      endpoints.review.questions(reviewId),
+      null,
+      { timeout: 60000 },
+    ),
 };
