@@ -1,24 +1,33 @@
 /**
- * 注册页面 - 2.5D 等距微立体风格（与登录页统一）
+ * 注册页面
  *
- * 功能：
- * 1. 左右分栏布局，左侧 2.5D 等距插画，注册卡片
- * 2. 用户名 + 邮箱 + 密码 + 确认密码注册
- * 3. 前端校验密码一致性
- * 4. 注册成功后跳转登录页
+ * 视觉与交互规格：docs/auth-pages-vite-spec.html（与登录页共用 AuthShell）
+ *
+ * 功能（与旧版一致，未做增减）：
+ * 1. 用户名 + 邮箱 + 6 位邮箱验证码 + 密码 + 确认密码
+ * 2. 前端校验密码一致性等规则
+ * 3. 注册成功后跳转登录页
+ *
+ * 顺带修复：旧版在 async 处理函数里 setInterval 且无清理，组件卸载后仍会
+ * 对已卸载组件 setState；现把定时器 id 存进 ref 并在 unmount 时清除。
  */
 
-import { useState } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import type { FormEvent } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
+import { useTranslation } from 'react-i18next';
 import { toast } from 'sonner';
 import { User, Mail, Lock, ShieldCheck } from 'lucide-react';
 import { authApi } from '../api/auth';
-import { GeometricBackground, IllustrationScene } from '../components/common/IllustrationScene';
+import AuthShell from '../components/auth/AuthShell';
+import { AuthInput, PasswordField } from '../components/auth/AuthInput';
+import InteractiveHoverButton from '../components/auth/InteractiveHoverButton';
 
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+const CODE_LENGTH = 6;
 
 export default function Register() {
+  const { t } = useTranslation();
   const navigate = useNavigate();
 
   const [username, setUsername] = useState('');
@@ -27,24 +36,38 @@ export default function Register() {
   const [countdown, setCountdown] = useState(0);
   const [password, setPassword] = useState('');
   const [confirmPassword, setConfirmPassword] = useState('');
+  const [showPassword, setShowPassword] = useState(false);
   const [loading, setLoading] = useState(false);
+
+  const countdownTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+
+  // 卸载时清理倒计时，避免对已卸载组件 setState
+  useEffect(() => () => {
+    if (countdownTimerRef.current !== null) {
+      clearInterval(countdownTimerRef.current);
+      countdownTimerRef.current = null;
+    }
+  }, []);
 
   /** 发送邮箱验证码（60s 倒计时防重复点击） */
   const handleSendCode = async () => {
     if (!EMAIL_RE.test(email)) {
-      toast.error('请输入正确的邮箱地址');
+      toast.error(t('auth.invalidEmail'));
       return;
     }
     if (countdown > 0) return;
 
     try {
       await authApi.sendVerificationCode(email);
-      toast.success('验证码已发送，请查收邮件');
+      toast.success(t('auth.codeSent'));
       setCountdown(60);
-      const timer = setInterval(() => {
+      countdownTimerRef.current = setInterval(() => {
         setCountdown((prev) => {
           if (prev <= 1) {
-            clearInterval(timer);
+            if (countdownTimerRef.current !== null) {
+              clearInterval(countdownTimerRef.current);
+              countdownTimerRef.current = null;
+            }
             return 0;
           }
           return prev - 1;
@@ -52,7 +75,7 @@ export default function Register() {
       }, 1000);
     } catch (err: unknown) {
       const error = err as { response?: { data?: { message?: string } } };
-      toast.error(error.response?.data?.message || '验证码发送失败');
+      toast.error(error.response?.data?.message || t('auth.codeSendFailed'));
     }
   };
 
@@ -62,23 +85,23 @@ export default function Register() {
 
     // 前端校验
     if (!EMAIL_RE.test(email)) {
-      toast.error('请输入正确的邮箱地址');
+      toast.error(t('auth.invalidEmail'));
       return;
     }
-    if (verificationCode.length !== 6) {
-      toast.error('请输入 6 位邮箱验证码');
+    if (verificationCode.length !== CODE_LENGTH) {
+      toast.error(t('auth.invalidCode'));
       return;
     }
     if (password.length < 8) {
-      toast.error('密码至少 8 位');
+      toast.error(t('auth.passwordTooShort'));
       return;
     }
     if (!/[a-zA-Z]/.test(password) || !/\d/.test(password)) {
-      toast.error('密码需同时包含字母和数字');
+      toast.error(t('auth.passwordWeak'));
       return;
     }
     if (password !== confirmPassword) {
-      toast.error('两次输入的密码不一致');
+      toast.error(t('auth.passwordMismatch'));
       return;
     }
 
@@ -91,201 +114,116 @@ export default function Register() {
         verification_code: verificationCode,
       });
 
-      toast.success('注册成功，请登录');
+      toast.success(t('auth.registerSuccess'));
       navigate('/login');
     } catch (err: unknown) {
       const error = err as { response?: { data?: { message?: string } } };
-      toast.error(error.response?.data?.message || '注册失败');
+      toast.error(error.response?.data?.message || t('auth.registerFailed'));
     } finally {
       setLoading(false);
     }
   };
 
   return (
-    <div className="min-h-screen flex relative overflow-hidden"
-      style={{ background: 'linear-gradient(135deg, #f0f6ff 0%, #e8f0fe 30%, #f5f9ff 60%, #dce8ff 100%)' }}>
-
-      {/* 微动效关键帧 */}
-      <style>{`
-        @keyframes iconFadeIn {
-          from { opacity: 0; transform: translateY(8px); }
-          to { opacity: 1; transform: translateY(0); }
-      `}</style>
-
-      {/* 2.5D 几何背景块面 */}
-      <GeometricBackground />
-
-      {/* ── 左侧：插画区（约60%） ── */}
-      <div className="hidden lg:flex items-center justify-center" style={{ width: '60%', minWidth: 480, position: 'relative', zIndex: 2 }}>
-        <IllustrationScene />
+    <AuthShell showPassword={showPassword} passwordLength={password.length}>
+      {/* 标题区 */}
+      <div className="mb-10 text-center">
+        <h1 className="text-2xl font-semibold text-[var(--color-text)]">{t('auth.createAccount')}</h1>
+        <p className="mt-1.5 text-sm text-[var(--color-text-secondary)]">{t('auth.registerSubtitle')}</p>
       </div>
 
-      {/* ── 右侧：注册卡片 ── */}
-      <div className="flex-1 flex items-center justify-center px-6 py-8" style={{ position: 'relative', zIndex: 2 }}>
-        <div className="w-full max-w-[380px]">
-          {/* 卡片容器 - 大圆角 */}
-          <div style={{
-            background: '#ffffff',
-            borderRadius: 24,
-            padding: '40px 36px 36px',
-            boxShadow: '0 12px 48px rgba(22,119,255,0.1), 0 4px 12px rgba(0,0,0,0.04)',
-          }}>
+      <form onSubmit={handleSubmit} className="space-y-5">
+        <AuthInput
+          icon={User}
+          value={username}
+          onChange={(e) => setUsername(e.target.value)}
+          placeholder={t('auth.usernamePlaceholder')}
+          autoComplete="username"
+          minLength={3}
+          maxLength={50}
+          required
+        />
 
-            {/* 主标题 - 云尚笔记 */}
-            <h2 className="text-center font-semibold mb-4" style={{ fontSize: 28, color: '#1a2a4a' }}>云尚</h2>
-
-            {/* 次级标题行 - 创建账号 */}
-            <div className="flex items-center justify-between mb-8">
-              <h1 className="text-xl font-semibold text-gray-700">创建账号</h1>
-              <div className="w-8 h-8 rounded-full bg-blue-50 flex items-center justify-center">
-                <User size={16} className="text-[#1677ff]" />
-              </div>
-            </div>
-
-            <form onSubmit={handleSubmit} className="space-y-5">
-              {/* 用户名 */}
-              <div className="relative">
-                <User size={16} className="absolute left-3.5 top-1/2 -translate-y-1/2 text-[#1677ff]" />
-                <input
-                  type="text"
-                  value={username}
-                  onChange={(e) => setUsername(e.target.value)}
-                  placeholder="请输入用户名"
-                  className="w-full pl-10 pr-4 py-2.5 text-sm text-gray-800
-                    placeholder:text-gray-400 outline-none transition-all duration-200
-                    hover:border-[#c8d0da]
-                    focus:border-[#1677ff] focus:shadow-[0_0_0_3px_rgba(22,119,255,0.08)]
-                    active:scale-[0.99]"
-                  style={{ borderRadius: 12, border: '1px solid #e0e4ea' }}
-                  minLength={3}
-                  maxLength={50}
-                  required
-                />
-              </div>
-
-              {/* 邮箱 + 发送验证码 */}
-              <div className="relative">
-                <Mail size={16} className="absolute left-3.5 top-1/2 -translate-y-1/2 text-[#1677ff]" />
-                <div className="flex gap-2">
-                  <input
-                    type="email"
-                    value={email}
-                    onChange={(e) => setEmail(e.target.value)}
-                    placeholder="请输入邮箱"
-                    className="w-full pl-10 pr-4 py-2.5 text-sm text-gray-800
-                      placeholder:text-gray-400 outline-none transition-all duration-200
-                      hover:border-[#c8d0da]
-                      focus:border-[#1677ff] focus:shadow-[0_0_0_3px_rgba(22,119,255,0.08)]
-                      active:scale-[0.99]"
-                    style={{ borderRadius: 12, border: '1px solid #e0e4ea' }}
-                    required
-                  />
-                  <button
-                    type="button"
-                    onClick={handleSendCode}
-                    disabled={countdown > 0}
-                    className="shrink-0 px-4 py-2.5 text-sm font-medium text-white
-                      bg-[#1677ff] hover:bg-[#0d5bd6] active:bg-[#0a4db8]
-                      disabled:opacity-50 transition-all duration-200"
-                    style={{ borderRadius: 12 }}
-                  >
-                    {countdown > 0 ? `${countdown}s` : '发送验证码'}
-                  </button>
-                </div>
-              </div>
-
-              {/* 验证码 */}
-              <div className="relative">
-                <ShieldCheck size={16} className="absolute left-3.5 top-1/2 -translate-y-1/2 text-[#1677ff]" />
-                <input
-                  type="text"
-                  value={verificationCode}
-                  onChange={(e) => setVerificationCode(e.target.value.replace(/\D/g, '').slice(0, 6))}
-                  placeholder="请输入 6 位数字验证码"
-                  className="w-full pl-10 pr-4 py-2.5 text-sm text-gray-800
-                    placeholder:text-gray-400 outline-none transition-all duration-200
-                    hover:border-[#c8d0da]
-                    focus:border-[#1677ff] focus:shadow-[0_0_0_3px_rgba(22,119,255,0.08)]
-                    active:scale-[0.99]"
-                  style={{ borderRadius: 12, border: '1px solid #e0e4ea' }}
-                  inputMode="numeric"
-                  maxLength={6}
-                  required
-                />
-              </div>
-
-              {/* 密码 */}
-              <div className="relative">
-                <Lock size={16} className="absolute left-3.5 top-1/2 -translate-y-1/2 text-[#1677ff]" />
-                <input
-                  type="password"
-                  value={password}
-                  onChange={(e) => setPassword(e.target.value)}
-                  placeholder="请输入密码"
-                  className="w-full pl-10 pr-4 py-2.5 text-sm text-gray-800
-                    placeholder:text-gray-400 outline-none transition-all duration-200
-                    hover:border-[#c8d0da]
-                    focus:border-[#1677ff] focus:shadow-[0_0_0_3px_rgba(22,119,255,0.08)]
-                    active:scale-[0.99]"
-                  style={{ borderRadius: 12, border: '1px solid #e0e4ea' }}
-                  minLength={8}
-                  required
-                />
-                <p className="mt-1 text-xs text-gray-400 pl-1">密码需8位以上，且必须同时包含字母和数字</p>
-              </div>
-
-              {/* 确认密码 */}
-              <div className="relative">
-                <Lock size={16} className="absolute left-3.5 top-1/2 -translate-y-1/2 text-[#1677ff]" />
-                <input
-                  type="password"
-                  value={confirmPassword}
-                  onChange={(e) => setConfirmPassword(e.target.value)}
-                  placeholder="请再次输入密码"
-                  className="w-full pl-10 pr-4 py-2.5 text-sm text-gray-800
-                    placeholder:text-gray-400 outline-none transition-all duration-200
-                    hover:border-[#c8d0da]
-                    focus:border-[#1677ff] focus:shadow-[0_0_0_3px_rgba(22,119,255,0.08)]
-                    active:scale-[0.99]"
-                  style={{ borderRadius: 12, border: '1px solid #e0e4ea' }}
-                  required
-                />
-              </div>
-
-              {/* 注册按钮 - 胶囊型 */}
-              <button
-                type="submit"
-                disabled={loading}
-                className="w-full py-2.5 text-white font-medium text-sm
-                  bg-[#1677ff] hover:bg-[#0d5bd6] active:bg-[#0a4db8] active:scale-[0.98]
-                  disabled:opacity-50 transition-all duration-200
-                  shadow-[0_4px_14px_rgba(22,119,255,0.3)] hover:shadow-[0_6px_22px_rgba(22,119,255,0.4)]"
-                style={{ borderRadius: 999 }}
-              >
-                {loading ? '注册中...' : '注册'}
-              </button>
-            </form>
-
-            {/* 底部登录入口 */}
-            <div className="mt-6">
-              <div className="relative flex items-center gap-3 mb-4">
-                <div className="flex-1 h-px bg-gray-200" />
-                <span className="text-xs text-gray-400">或</span>
-                <div className="flex-1 h-px bg-gray-200" />
-              </div>
-              <Link
-                to="/login"
-                className="block w-full py-2.5 text-center text-sm font-medium
-                  text-[#1677ff] bg-blue-50 hover:bg-blue-100
-                  rounded-xl border border-blue-100 hover:border-blue-200
-                  transition-all duration-200"
-              >
-                已有账号？立即登录
-              </Link>
-            </div>
-          </div>
+        {/* 邮箱 + 发送验证码（与验证码行同款并排布局） */}
+        <div className="flex items-start gap-3">
+          <AuthInput
+            icon={Mail}
+            wrapClassName="flex-1"
+            type="email"
+            value={email}
+            onChange={(e) => setEmail(e.target.value)}
+            placeholder={t('auth.emailPlaceholder')}
+            autoComplete="email"
+            required
+          />
+          <button
+            type="button"
+            onClick={handleSendCode}
+            disabled={countdown > 0}
+            className="h-12 shrink-0 rounded-full bg-[var(--color-accent-bg)] px-4 text-sm font-medium
+              text-[var(--color-accent)] transition-opacity hover:opacity-80 disabled:opacity-50"
+          >
+            {countdown > 0 ? t('auth.resendCountdown', { s: countdown }) : t('auth.sendCode')}
+          </button>
         </div>
-      </div>
-    </div>
+
+        <AuthInput
+          icon={ShieldCheck}
+          value={verificationCode}
+          onChange={(e) => setVerificationCode(e.target.value.replace(/\D/g, '').slice(0, CODE_LENGTH))}
+          placeholder={t('auth.codePlaceholder')}
+          inputMode="numeric"
+          autoComplete="one-time-code"
+          maxLength={CODE_LENGTH}
+          required
+        />
+
+        <div>
+          <PasswordField
+            icon={Lock}
+            value={password}
+            onChange={(e) => setPassword(e.target.value)}
+            visible={showPassword}
+            onToggleVisible={() => setShowPassword((v) => !v)}
+            placeholder={t('auth.passwordPlaceholder')}
+            autoComplete="new-password"
+            minLength={8}
+            required
+          />
+          <p className="mt-1.5 pl-4 text-xs text-[var(--color-text-tertiary)]">
+            {t('auth.passwordHint')}
+          </p>
+        </div>
+
+        <PasswordField
+          icon={Lock}
+          value={confirmPassword}
+          onChange={(e) => setConfirmPassword(e.target.value)}
+          visible={showPassword}
+          onToggleVisible={() => setShowPassword((v) => !v)}
+          placeholder={t('auth.confirmPasswordPlaceholder')}
+          autoComplete="new-password"
+          required
+        />
+
+        <InteractiveHoverButton
+          type="submit"
+          label={t('auth.register')}
+          loadingLabel={t('auth.registering')}
+          loading={loading}
+        />
+      </form>
+
+      {/* 底部切换入口 */}
+      <p className="mt-8 text-center text-sm text-[var(--color-text-secondary)]">
+        {t('auth.hasAccount')}{' '}
+        <Link
+          to="/login"
+          className="font-medium text-[var(--color-accent)] transition-opacity hover:opacity-80"
+        >
+          {t('auth.signInNow')}
+        </Link>
+      </p>
+    </AuthShell>
   );
 }
