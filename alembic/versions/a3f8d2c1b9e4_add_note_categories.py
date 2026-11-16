@@ -63,6 +63,7 @@ def migrate_category_data(bind) -> None:
         sa.column('parent_id', sa.String),
         sa.column('name', sa.String),
         sa.column('sort_order', sa.Integer),
+        sa.column('deleted_at', sa.DateTime),
     )
 
     user_ids = [row[0] for row in bind.execute(sa.select(users_t.c.uuid))]
@@ -83,15 +84,24 @@ def migrate_category_data(bind) -> None:
         # ② 以模板树为蓝本创建完整分类树（保留静态树设计的层级结构）
         #    同名匹配行为：模板嵌套节点（如 工作/脚本）也会写入 name 映射，
         #    历史笔记 category="脚本" 将归入 工作/脚本（期望行为）
-        name_to_id = {}
+        existing = list(bind.execute(
+            sa.select(cats_t.c.id, cats_t.c.parent_id, cats_t.c.name).where(
+                cats_t.c.user_id == user_id,
+                cats_t.c.deleted_at.is_(None),
+            )
+        ))
+        existing_by_parent = {(row.parent_id, row.name): row.id for row in existing}
+        name_to_id = {row.name: row.id for row in existing}
 
         def seed(nodes, parent_id):
             for i, node in enumerate(nodes):
-                cid = str(uuid.uuid4())
-                bind.execute(cats_t.insert().values(
-                    id=cid, user_id=user_id, parent_id=parent_id,
-                    name=node["name"], sort_order=i,
-                ))
+                cid = existing_by_parent.get((parent_id, node["name"]))
+                if cid is None:
+                    cid = str(uuid.uuid4())
+                    bind.execute(cats_t.insert().values(
+                        id=cid, user_id=user_id, parent_id=parent_id,
+                        name=node["name"], sort_order=i,
+                    ))
                 name_to_id[node["name"]] = cid
                 if node.get("children"):
                     seed(node["children"], cid)
@@ -115,6 +125,7 @@ def migrate_category_data(bind) -> None:
                 .where(
                     notes_t.c.user_id == user_id,
                     notes_t.c.category == cat_str,
+                    notes_t.c.category_id.is_(None),
                 )
                 .values(category_id=cid)
             )
@@ -122,7 +133,51 @@ def migrate_category_data(bind) -> None:
 
 def upgrade() -> None:
     """升级迁移：建表 + 加列 + 存量数据迁移"""
+    offline = context.is_offline_mode()
+    inspector = None if offline else sa.inspect(op.get_bind())
+    create_categories = inspector is None or not inspector.has_table('note_categories')
+    columns = set() if inspector is None else {
+        col['name'] for col in inspector.get_columns('notes')
+    }
+    add_category_id = 'category_id' not in columns
+
     # 1. 创建 note_categories 表
+    if create_categories:
+        _create_category_table()
+
+    # 旧版 create_all 可能已创建部分结构；逐项检查，避免重复 DDL。
+    category_indexes = set() if create_categories else {
+        index['name'] for index in inspector.get_indexes('note_categories')
+    }
+    for name, column in (
+        ('ix_note_categories_user_id', 'user_id'),
+        ('ix_note_categories_parent_id', 'parent_id'),
+    ):
+        if name not in category_indexes:
+            op.create_index(name, 'note_categories', [column], unique=False)
+
+    if add_category_id:
+        op.add_column('notes', sa.Column('category_id', sa.String(length=36), nullable=True))
+    note_indexes = set() if inspector is None else {
+        index['name'] for index in inspector.get_indexes('notes')
+    }
+    if 'ix_notes_category_id' not in note_indexes:
+        op.create_index('ix_notes_category_id', 'notes', ['category_id'], unique=False)
+    foreign_keys = [] if inspector is None else inspector.get_foreign_keys('notes')
+    if not any(
+        fk['constrained_columns'] == ['category_id'] and fk['referred_table'] == 'note_categories'
+        for fk in foreign_keys
+    ):
+        op.create_foreign_key(
+            'fk_notes_category_id_note_categories',
+            'notes', 'note_categories', ['category_id'], ['id'], ondelete='SET NULL',
+        )
+
+    if not offline and (create_categories or add_category_id):
+        migrate_category_data(op.get_bind())
+
+
+def _create_category_table() -> None:
     op.create_table(
         'note_categories',
         sa.Column('id', sa.String(length=36), nullable=False),
@@ -140,23 +195,6 @@ def upgrade() -> None:
         # 自引用：父分类物理删除时子孙一并清除（软删除由业务层处理，不走外键级联）
         sa.ForeignKeyConstraint(['parent_id'], ['note_categories.id'], ondelete='CASCADE'),
     )
-    op.create_index('ix_note_categories_user_id', 'note_categories', ['user_id'], unique=False)
-    op.create_index('ix_note_categories_parent_id', 'note_categories', ['parent_id'], unique=False)
-
-    # 2. notes 表新增 category_id 列 + 索引 + 外键（分类物理删除 → SET NULL 变未分类）
-    op.add_column('notes', sa.Column('category_id', sa.String(length=36), nullable=True))
-    op.create_index('ix_notes_category_id', 'notes', ['category_id'], unique=False)
-    op.create_foreign_key(
-        'fk_notes_category_id_note_categories',
-        'notes', 'note_categories',
-        ['category_id'], ['id'],
-        ondelete='SET NULL',
-    )
-
-    # 3. 存量数据迁移（离线模式 --sql 只生成 DDL，不执行数据迁移）
-    if context.is_offline_mode():
-        return
-    migrate_category_data(op.get_bind())
 
 
 def downgrade() -> None:

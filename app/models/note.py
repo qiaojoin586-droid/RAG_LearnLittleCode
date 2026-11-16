@@ -9,7 +9,7 @@
 import uuid
 from datetime import datetime
 
-from sqlalchemy import String, Text, DateTime, Boolean, ForeignKey, JSON, func, Index
+from sqlalchemy import String, Text, DateTime, Boolean, ForeignKey, JSON, func, Index, true
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.models.base import Base
@@ -76,6 +76,7 @@ class Note(Base):
     
     # 是否置顶
     is_pinned: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    is_indexed: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=true())
     
     # 软删除时间戳（NULL 表示未删除，非 NULL 表示已删除）
     deleted_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)

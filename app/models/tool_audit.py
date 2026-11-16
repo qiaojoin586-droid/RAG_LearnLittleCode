@@ -30,6 +30,11 @@ class ToolCallAudit(Base):
     request_id: Mapped[str | None] = mapped_column(String(32), nullable=True, index=True)
     user_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
     session_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    run_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    tool_call_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    step_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    operation_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    error_code: Mapped[str | None] = mapped_column(String(64), nullable=True)
 
     # 工具名 / 入参预览 / 结果预览（均截断 500 字符）
     tool_name: Mapped[str | None] = mapped_column(String(50), nullable=True)

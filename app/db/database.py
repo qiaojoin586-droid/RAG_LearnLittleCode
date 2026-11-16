@@ -119,7 +119,7 @@ async def init_db() -> None:
 
     流程：
     1. 遗留库检测：有业务表但无 alembic_version 表（create_all/_migrate_columns 时代
-       创建的库，schema 与当前模型一致），先 stamp 到 head，标记为已迁移
+       创建的库），仅标记固定初始版本，后续迁移检查并补齐缺失的表、列与索引
     2. 执行 `alembic upgrade head`：空库自动全量建表，有版本则增量迁移
 
     Alembic 运行在线程中（asyncio.to_thread），内部自建独立引擎，
@@ -134,7 +134,7 @@ async def init_db() -> None:
     alembic_ini = Path(__file__).resolve().parents[2] / "alembic.ini"
     cfg = Config(str(alembic_ini))
 
-    # 遗留库检测：存在业务表且无 alembic_version → stamp 到 head
+    # 固定到初始基线，不能用 head：旧库未必已经具备新增分类、全文索引和文档类型。
     async with engine.connect() as conn:
         def _check_legacy(sync_conn):
             inspector = inspect(sync_conn)
@@ -144,8 +144,8 @@ async def init_db() -> None:
         is_legacy = await conn.run_sync(_check_legacy)
 
     if is_legacy:
-        logger.info("检测到遗留数据库（无 alembic_version），stamp 到当前迁移版本")
-        await asyncio.to_thread(command.stamp, cfg, "head")
+        logger.info("检测到遗留数据库（无 alembic_version），从初始基线补跑增量迁移")
+        await asyncio.to_thread(command.stamp, cfg, "06f20a30109b")
 
     await asyncio.to_thread(command.upgrade, cfg, "head")
     logger.info("数据库迁移完成 (alembic upgrade head)")
