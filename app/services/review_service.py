@@ -7,6 +7,8 @@
 - 标记回顾完成（更新下次回顾时间）
 - 生成回顾问题（LLM）
 """
+from app.model_config.runtime import model_for, template_for
+from app.model_config.snapshots import current_snapshot
 
 from datetime import datetime, timedelta
 from typing import List, Optional
@@ -229,6 +231,7 @@ class ReviewService:
              "latency_ms": int, "cached": bool}
             任何失败（无模型 / 内容过短 / 调用或解析异常）返回空 questions，不抛异常
         """
+        chat_model = model_for('review_question', chat_model)
         from app.core.failed_response import BusinessError, ErrorCode
 
         empty = {"questions": [], "model": "", "latency_ms": 0, "cached": False}
@@ -263,6 +266,7 @@ class ReviewService:
             note: 具备 id / title / content / updated_at 的对象（ORM 或替身）
             chat_model: LLM 实例
         """
+        chat_model = model_for('review_question', chat_model)
         empty = {"questions": [], "model": "", "latency_ms": 0, "cached": False}
 
         content = (note.content or "").strip()
@@ -271,6 +275,8 @@ class ReviewService:
 
         # 缓存键包含 updated_at：笔记内容变化后自动失效
         cache_key = f"review_q:{note.id}:{int(note.updated_at.timestamp())}"
+        if current_snapshot() is not None:
+            cache_key += ':'+current_snapshot().release_id
         redis = None
         try:
             from app.db.redis_client import get_redis
@@ -311,6 +317,8 @@ class ReviewService:
             raw = response.content if isinstance(response.content, str) else ""
         except Exception as e:
             logger.warning(f"复习题生成失败: note_id={note.id}, {type(e).__name__}: {e}")
+            from app.model_config.runtime import require_failure_policy
+            require_failure_policy('review_question','disabled')
             return empty
 
         questions = self._parse_questions(raw)

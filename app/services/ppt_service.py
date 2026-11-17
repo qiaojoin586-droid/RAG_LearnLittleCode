@@ -13,6 +13,8 @@ PPT 生成服务（设计方案 §4.3）
 模型获取：不持有模型引用，generate() 内函数内延迟导入
 （与 chat.py 函数内导入模式一致，见 §4.3「LLM 获取路径」）。
 """
+from app.model_config.runtime import model_for, template_for
+from app.model_config.snapshots import current_snapshot
 import asyncio
 import json
 import os
@@ -73,6 +75,8 @@ class PptService:
         复用 DASHSCOPE_BASE_URL / DASHSCOPE_API_KEY（factory.py:322/344），
         不依赖 init_manager 的对话模型实例（避免 thinking 开关干扰 JSON 模式）。
         """
+        if current_snapshot() is not None:
+            return model_for('ppt_outline')
         from langchain_openai import ChatOpenAI
 
         from app.utils.factory import DASHSCOPE_BASE_URL
@@ -253,7 +257,10 @@ class PptService:
             f"笔记内容：\n{context}"
         )
         outline_timeout = self.config.get("outline_timeout", 45)
+        prompt=template_for('ppt_outline',prompt,content=context,title=title or '',requirements=style,user_message=context)
         retries = self.config.get("outline_retries", 1)
+        if current_snapshot() is not None:
+            retries=0
         last_error: Optional[Exception] = None
 
         for attempt in range(retries + 1):
@@ -346,7 +353,9 @@ class PptService:
 
     def _save_file(self, user_id: str, title: str, pptx_bytes: bytes,
                    slide_count: Optional[int] = None) -> str:
-        file_id = uuid.uuid4().hex
+        from app.ai_service.tool_results import artifact_output_id
+
+        file_id = artifact_output_id.get() or uuid.uuid4().hex
         user_dir = self._user_dir(user_id)
         user_dir.mkdir(parents=True, exist_ok=True)
 

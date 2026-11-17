@@ -17,12 +17,14 @@ import json
 import os
 import time
 import uuid
-from datetime import datetime
+from contextlib import contextmanager
+from datetime import datetime, timedelta, timezone
 from typing import Dict, List, Optional
 
 from langchain_core.callbacks import BaseCallbackHandler
 
 from app.core.logger_handler import logger
+from app.core.request_context import current_request_id
 
 # 当前请求的追踪上下文（contextvar：每个请求独立，不跨请求污染）
 _trace_ctx: contextvars.ContextVar[Optional[Dict[str, str]]] = contextvars.ContextVar(
@@ -54,7 +56,16 @@ def set_trace_stage(stage: str) -> None:
     """更新当前阶段标记（classify/agent/plan_execute/title/summary 等）"""
     ctx = _trace_ctx.get()
     if ctx:
-        ctx["stage"] = stage
+        _trace_ctx.set({**ctx, "stage": stage})
+
+
+@contextmanager
+def trace_scope(**values):
+    token = _trace_ctx.set({**(_trace_ctx.get() or {}), **values})
+    try:
+        yield
+    finally:
+        _trace_ctx.reset(token)
 
 
 def get_trace_context() -> Optional[Dict[str, str]]:
@@ -63,8 +74,8 @@ def get_trace_context() -> Optional[Dict[str, str]]:
 
 
 def new_request_id() -> str:
-    """生成请求 ID（12 位 hex，日志可读性）"""
-    return uuid.uuid4().hex[:12]
+    """Reuse the HTTP request ID; standalone work receives a 32-hex ID."""
+    return current_request_id()
 
 
 # ============================================================
@@ -158,13 +169,20 @@ class DbSink(_QueueSink):
         # 延迟导入，避免 core 层与 db/models 层循环依赖
         from app.db.database import async_session_factory
         from app.models.model_trace import ModelTrace
+        from app.model_config.pricing import price_trace_batch, trace_row
 
         try:
             async with async_session_factory() as db:
-                db.add_all(ModelTrace(**event) for event in batch)
+                try:
+                    rows = await price_trace_batch(db, batch)
+                except Exception as error:
+                    await db.rollback()
+                    logger.warning(f'模型价格查询失败，保留用量记录：{type(error).__name__}')
+                    rows = [trace_row(event) for event in batch]
+                db.add_all(ModelTrace(**row) for row in rows)
                 await db.commit()
         except Exception as e:
-            logger.warning(f"model_trace 落库失败（丢弃 {len(batch)} 条）: {e}")
+            logger.warning(f"model_trace 落库失败（丢弃 {len(batch)} 条）: {type(e).__name__}")
 
 
 class LangfuseSink(_QueueSink):
@@ -243,6 +261,68 @@ def _emit(event: dict) -> None:
             sink.emit(event)
         except Exception as e:
             logger.warning(f"model_trace sink 输出失败: {type(e).__name__}: {e}")
+
+
+def price_time(latency_ms=0):
+    return (datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(milliseconds=latency_ms or 0)).isoformat()
+
+
+def record_config_test_call(context: dict, profile: dict, *, success: bool, usage: dict | None,
+                            latency_ms: int, error: str | None, price_at=None):
+    """Only fixed metadata and usage reach sinks; never prompts, headers or replies."""
+    from app.model_config.endpoints import canonical_url
+    prompt,completion = (usage.get('prompt_tokens'),usage.get('completion_tokens')) if isinstance(usage,dict) else (None,None)
+    known = all(isinstance(value,int) and not isinstance(value,bool) and value>=0 for value in (prompt,completion))
+    event = {key:context.get(key) for key in ('user_id','profile_revision_id','credential_revision_id',
+                                           'credential_version','step_id')}
+    event.update(request_id=current_request_id(),stage='config_test',model=profile['model'][:100],
+        is_test=True,adapter_type=profile['adapter_type'],provider_origin=canonical_url(profile['base_url'])[0],
+        success=success,prompt_tokens=prompt if known else None,completion_tokens=completion if known else None,
+        total_tokens=prompt+completion if known else None,usage_status='complete' if known else 'unknown',
+        latency_ms=latency_ms,error=error,cost_amount=None,price_version_id=None,pricing_status='unknown',
+        _price_at=price_at or price_time(latency_ms))
+    _emit(event)
+
+
+def record_discarded_chat_attempt(context, profile, reason, latency_ms, price_at=None):
+    """Account for the discarded attempt separately from the final model trace."""
+    from app.model_config.endpoints import canonical_url
+    from app.model_config.snapshots import inference_actor
+
+    trace = _trace_ctx.get() or {}
+    actor = inference_actor.get() or {}
+    _emit({**context, 'request_id': trace.get('request_id') or current_request_id(),
+        'user_id': actor.get('user_id', ''), 'session_id': trace.get('session_id'),
+        'stage': 'model_retry', 'model': profile['model'][:100],
+        'adapter_type': profile['adapter_type'], 'provider_origin': canonical_url(profile['base_url'])[0],
+        'success': False, 'is_test': False, 'latency_ms': latency_ms, 'error': reason,
+        'usage_status': 'unknown', 'pricing_status': 'unknown', '_price_at': price_at or price_time(latency_ms)})
+
+
+def embedding_prompt_tokens(response,protocol):
+    usage=response.get('usage',{}) if isinstance(response,dict) else {}
+    tokens=usage.get('prompt_tokens') if isinstance(usage,dict) else None
+    if protocol=='ollama_embed' and isinstance(response,dict):tokens=response.get('prompt_eval_count')
+    return tokens if type(tokens) is int and tokens>=0 else None
+
+
+def record_embedding_call(snapshot,index,profile,purpose,success,response,latency_ms,error,price_at=None,*,reported_tokens=None):
+    """Vector attempt metadata only; no document/query text, vectors or Key."""
+    from app.model_config.snapshots import inference_actor
+    from app.model_config.endpoints import canonical_url
+    tokens=reported_tokens if reported_tokens is not None else embedding_prompt_tokens(response,profile['api_protocol'])
+    known=tokens is not None
+    credential=snapshot.credentials.get(profile['credential_revision_id'])
+    _emit({'request_id':current_request_id(),'user_id':(inference_actor.get() or {}).get('user_id',''),
+        'stage':'embedding','model':profile['model'][:100],'release_id':snapshot.release_id,
+        'profile_revision_id':profile['id'],'credential_revision_id':profile['credential_revision_id'],
+        'credential_version':credential['credential_version'] if credential else None,
+        'adapter_type':profile['adapter_type'],'provider_origin':canonical_url(profile['base_url'])[0],
+        'index_context':{'index_version_id':index['id'],'semantic_fingerprint':index['semantic_fingerprint'],'purpose':purpose},
+        'is_test':False,'success':success,'latency_ms':latency_ms,'error':error,
+        'prompt_tokens':tokens if known else None,'completion_tokens':0 if known else None,
+        'total_tokens':tokens if known else None,'usage_status':'complete' if known else 'unknown',
+        'cost_amount':None,'price_version_id':None,'pricing_status':'unknown', '_price_at':price_at or price_time(latency_ms)})
 
 
 def start_trace_bus() -> None:
@@ -327,7 +407,13 @@ class ModelTraceCallbackHandler(BaseCallbackHandler):
             "user_id": ctx.get("user_id") or "",
             "session_id": ctx.get("session_id") or None,
             "stage": ctx.get("stage", "chat"),
-            "model": model,
+            "model": ctx.get("model_override", model)[:100],
+            **{key:ctx[key] for key in ('release_id','profile_revision_id','prompt_revision_id',
+                'credential_revision_id','credential_version','adapter_type','provider_origin','workflow_id','step_id','memory_context') if key in ctx},
+            **({'pricing_status':'unknown','cost_amount':None,'price_version_id':None,
+                '_price_at':ctx.get('price_at') or price_time(latency_ms),
+                'usage_status':'complete' if usage and all(usage.get(key) is not None for key in ('prompt_tokens','completion_tokens')) else 'unknown'}
+               if ctx.get('release_id') else {}),
             "prompt_tokens": (usage or {}).get("prompt_tokens"),
             "completion_tokens": (usage or {}).get("completion_tokens"),
             "total_tokens": (usage or {}).get("total_tokens"),
@@ -380,12 +466,17 @@ class ModelTraceCallbackHandler(BaseCallbackHandler):
             "total_tokens": meta.get("total_tokens"),
         }
 
-    def on_llm_error(self, error: Exception, **kwargs) -> None:
+    def on_llm_error(self, error: Exception, *, usage=None, **kwargs) -> None:
         key = self._run_key(kwargs)
         start = self._started.pop(key, None)
         latency_ms = round((time.monotonic() - start) * 1000) if start else None
         model = self._models.pop(key, "unknown")
-        self._snapshot(model=model, success=False, usage=None, latency_ms=latency_ms, error=str(error)[:200])
+        self._snapshot(model=model, success=False, usage=usage, latency_ms=latency_ms, error=str(error)[:200])
+
+    def discard_start(self, **kwargs) -> None:
+        key = self._run_key(kwargs)
+        self._started.pop(key, None)
+        self._models.pop(key, None)
 
 
 # 全局共享回调实例（factory 创建模型时挂载）

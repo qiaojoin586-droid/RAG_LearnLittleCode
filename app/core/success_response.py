@@ -11,8 +11,8 @@
 }
 """
 
-import uuid
 from typing import Any, Optional
+from app.core.request_context import current_request_id
 
 
 def success_response(
@@ -37,5 +37,5 @@ def success_response(
         "code": code,
         "message": message,
         "data": data,
-        "request_id": request_id or str(uuid.uuid4())
+        "request_id": request_id or current_request_id()
     }

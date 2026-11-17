@@ -16,13 +16,14 @@ MCP 客户端生命周期管理（MCP 专项方案 Part A / 实施文档 §5）
 """
 
 import os
+import asyncio
 from functools import wraps
 from typing import Dict, List
 
 from app.ai_service.tool_registry import init_tool_registry, tool_registry
 from app.core.logger_handler import logger
 from app.utils.config import get_mcp_servers_config
-from app.utils.ssrf_guard import extract_url_arg, validate_public_url
+from app.utils.ssrf_guard import validate_public_url
 
 
 class MCPManager:
@@ -136,15 +137,37 @@ def _wrap_ssrf_guard(tool):
     handle_tool_errors=True 语义一致，LLM 以普通工具结果看到"拒绝原因"，
     可自纠错（提示用户更换合法外网 URL），不会中断 Agent 运行。
     """
+    from app.utils.ssrf_guard import extract_url_args
+
     args_schema = getattr(tool, "args_schema", None)
-    model_fields = getattr(args_schema, "model_fields", None) or {}
-    if "url" not in model_fields:
+    if isinstance(args_schema, dict):
+        schema = args_schema
+    elif hasattr(args_schema, "model_json_schema"):
+        schema = args_schema.model_json_schema()
+    else:
+        schema = {}
+    url_fields = set()
+
+    def scan(node):
+        if isinstance(node, dict):
+            for name, definition in node.get("properties", {}).items():
+                lowered = name.lower()
+                if lowered in {"url", "urls"} or lowered.endswith(("_url", "_urls")):
+                    url_fields.add(name)
+                elif isinstance(definition, dict) and definition.get("format") in {"uri", "url"}:
+                    url_fields.add(name)
+            for item in node.values():
+                scan(item)
+        elif isinstance(node, list):
+            for item in node:
+                scan(item)
+
+    scan(schema)
+    if not url_fields:
         return tool  # 无 url 参数的工具（如 tavily_search）无需守卫
 
     original_run = getattr(tool, "_run", None)
     original_arun = getattr(tool, "_arun", None)
-    if original_arun is None:
-        return tool  # 无异步入口，跳过（MCP 工具均为 StructuredTool，正常不会走到）
 
     def _guard_error(url, err: Exception) -> str:
         return (
@@ -155,27 +178,26 @@ def _wrap_ssrf_guard(tool):
     if original_run is not None:
         @wraps(original_run)
         def _guarded_run(*args, **kwargs):
-            url = extract_url_arg(args, kwargs)
-            if url:
-                try:
+            try:
+                for url in extract_url_args(args, kwargs, url_fields):
                     validate_public_url(url)
-                except ValueError as e:
-                    return _guard_error(url, e)
+            except ValueError as e:
+                return _guard_error("", e)
             return original_run(*args, **kwargs)
 
         tool._run = _guarded_run
 
-    @wraps(original_arun)
-    async def _guarded_arun(*args, **kwargs):
-        url = extract_url_arg(args, kwargs)
-        if url:
+    if original_arun is not None:
+        @wraps(original_arun)
+        async def _guarded_arun(*args, **kwargs):
             try:
-                validate_public_url(url)
+                for url in extract_url_args(args, kwargs, url_fields):
+                    await asyncio.to_thread(validate_public_url, url)
             except ValueError as e:
-                return _guard_error(url, e)
-        return await original_arun(*args, **kwargs)
+                return _guard_error("", e)
+            return await original_arun(*args, **kwargs)
 
-    tool._arun = _guarded_arun
+        tool._arun = _guarded_arun
     logger.info(f"[mcp] 工具已加 SSRF 地址守卫: {getattr(tool, 'name', '')}")
     return tool
 

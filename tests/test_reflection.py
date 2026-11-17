@@ -454,6 +454,16 @@ class TestReactEventsL2:
 class TestStepLevelL2:
     """Plan-Execute 步骤级 L2：步骤失败 → 重试 1 次"""
 
+    @pytest.fixture(autouse=True)
+    def registered_search_tool(self, monkeypatch):
+        # The fake MCP tool must be registered, just like a production MCP tool.
+        # Unknown names no longer grant the complete tool set.
+        registry = plan_execute_agent.tool_registry
+        monkeypatch.setattr(registry, "_groups", {**registry._groups,
+            "mcp": [*registry._groups.get("mcp", []), "tavily_search"]})
+        monkeypatch.setattr(registry, "_dynamic_tools", {**registry._dynamic_tools,
+            "tavily_search": object()})
+
     def _step(self, tool="tavily_search"):
         return plan_execute_agent.PlanStep(step=1, action="搜索", tool=tool, depends_on=[])
 

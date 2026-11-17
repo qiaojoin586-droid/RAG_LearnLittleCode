@@ -14,6 +14,11 @@
 from datetime import datetime, timezone
 
 
+def utc_now() -> datetime:
+    """返回无时区标记的 UTC 当前时间，与数据库 DateTime 字段保持一致。"""
+    return datetime.now(timezone.utc).replace(tzinfo=None)
+
+
 def to_utc_iso(dt: datetime | None) -> str | None:
     """
     datetime → 带 UTC 偏移的 ISO 字符串（对外输出）
