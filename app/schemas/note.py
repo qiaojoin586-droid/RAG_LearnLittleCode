@@ -18,6 +18,7 @@ class NoteCreate(BaseModel):
     category: Optional[str] = Field(None, max_length=100, description="分类")
     category_id: Optional[str] = Field(None, max_length=36, description="分类 ID（双写期间与 category 并行，优先使用）")
     is_pinned: bool = Field(False, description="是否置顶")
+    is_indexed: bool = Field(True, strict=True, description="是否供 AI 语义检索")
     # 文档类型：md = Markdown（默认）/ txt = 纯文本；仅新建时写入
     format: Optional[str] = Field(
         'md', pattern='^(md|txt)$', description="文档类型"
@@ -32,6 +33,7 @@ class NoteUpdate(BaseModel):
     category: Optional[str] = Field(None, max_length=100, description="分类")
     category_id: Optional[str] = Field(None, max_length=36, description="分类 ID（显式传 None 表示移为未分类）")
     is_pinned: Optional[bool] = Field(None, description="是否置顶")
+    is_indexed: bool = Field(True, strict=True, description="是否供 AI 语义检索，省略时保留当前设置")
 
 
 class NoteResponse(BaseModel):
@@ -44,6 +46,7 @@ class NoteResponse(BaseModel):
     category: Optional[str] = None
     category_id: Optional[str] = None  # 分类 ID（双写期间与 category 并行返回）
     is_pinned: bool
+    is_indexed: bool = True
     format: str = 'md'  # 文档类型（md/txt；旧数据兼容默认 md）
     created_at: datetime
     updated_at: datetime

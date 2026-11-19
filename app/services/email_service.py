@@ -100,6 +100,8 @@ class EmailService:
         attachments: Optional[List[dict]] = None,
         retries: int = 2,
         backoff: float = 2.0,
+        *,
+        message_id: Optional[str] = None,
     ) -> None:
         """
         发送邮件，自动重试瞬态错误（指数退避 2s → 4s）。
@@ -112,6 +114,7 @@ class EmailService:
             attachments: 可选附件列表，每项为 {"filename": str, "data": bytes, "mime": str}
             retries: 最大重试次数（不含首次尝试）
             backoff: 首次重试等待秒数，按 2^n 指数递增
+            message_id: 已登记的邮件 Message-ID（助手审批使用）
 
         Raises:
             aiosmtplib.SMTPAuthenticationError: 认证失败（配置问题，不重试）
@@ -144,6 +147,8 @@ class EmailService:
         msg["From"] = formataddr((self.smtp_from_name, self.smtp_username))
         msg["To"] = to
         msg["Subject"] = str(Header(subject, "utf-8"))
+        if message_id:
+            msg['Message-ID'] = message_id
 
         # 附件挂在 mixed 外层（文件名含中文时用 RFC2231 编码）
         for att in attachments or []:
@@ -161,6 +166,7 @@ class EmailService:
             msg.attach(part)
 
         last_error = None
+        accepted = False
         for attempt in range(retries + 1):
             try:
                 async with aiosmtplib.SMTP(
@@ -173,9 +179,17 @@ class EmailService:
                     if self.smtp_username:
                         await smtp.login(self.smtp_username, self.smtp_password)
                     await smtp.send_message(msg)
+                    accepted = True
+                if message_id:
+                    logger.info('审批邮件已由 SMTP 受理: message_id=%s', message_id)
+                    return
                 logger.info(f"邮件发送成功: to={to}, subject={subject}")
                 return
             except (aiosmtplib.SMTPConnectError, aiosmtplib.SMTPTimeoutError) as e:
+                if message_id:
+                    if accepted:
+                        return
+                    raise
                 last_error = e
                 if attempt < retries:
                     wait = backoff * (2 ** attempt)
@@ -185,6 +199,8 @@ class EmailService:
                     )
                     await asyncio.sleep(wait)
             except aiosmtplib.SMTPAuthenticationError:
+                if message_id:
+                    raise
                 logger.error(f"SMTP 认证失败（请检查授权码配置）: {self.smtp_username}")
                 raise
         logger.error(f"邮件发送失败（重试耗尽）: to={to}, error={last_error}")
