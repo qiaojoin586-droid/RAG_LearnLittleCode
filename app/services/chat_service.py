@@ -4,8 +4,11 @@
 封装 RAG 查询和会话管理的业务逻辑，
 作为 Router 层和底层 Service/RAG 之间的桥梁。
 """
+from app.model_config.runtime import model_for, template_for
+from app.model_config.snapshots import current_snapshot
 
 from typing import Optional
+from app.core.failed_response import BusinessError
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -84,7 +87,11 @@ class ChatService:
     async def save_message_with_commit(
         self, session_id: str, user_id: str, role: str, content: str,
         idempotency_key: Optional[str] = None,
-        attachments_json: Optional[list] = None
+        attachments_json: Optional[list] = None,
+        before_commit=None,
+        require_commit: bool = False,
+        *,
+        before_message_commit=None,
     ) -> Optional[int]:
         """
         使用独立 session 保存消息并 commit（用于异步后台任务）
@@ -105,15 +112,27 @@ class ChatService:
         """
         try:
             async with async_session_factory() as db:
+                cache_options = {'cache_immediately': False} if before_message_commit is not None else {}
                 message = await self.session_manager.add_message(
                     db, session_id, user_id, role, content, idempotency_key,
                     attachments_json=attachments_json,
+                    **cache_options,
                 )
+                if before_commit is not None:
+                    await before_commit(db)
+                if before_message_commit is not None:
+                    await before_message_commit(db, message)
                 await db.commit()
+                if before_message_commit is not None and message is not None:
+                    await self.session_manager.cache_message(session_id, message)
                 logger.info(f"消息保存成功: session={session_id[:12]}, role={role}, len={len(content)}")
                 return message.id if message else None
         except Exception as e:
-            logger.error(f"保存消息失败: session_id={session_id}, role={role}, error={type(e).__name__}: {e}", exc_info=True)
+            logger.error(f"消息持久化失败: role={role}, error_type={type(e).__name__}")
+            if require_commit:
+                if isinstance(e, BusinessError):
+                    raise
+                raise BusinessError(50001,message='消息持久化失败，请重试',http_status=500) from None
             return None
 
     async def generate_and_update_title(
@@ -133,6 +152,7 @@ class ChatService:
             chat_model: LLM 模型实例
             attachment_names: 附件文件名列表（消息为空时标题兜底）
         """
+        chat_model = model_for('session_title', chat_model)
         try:
             # 模型 trace 独立上下文（后台任务，无请求上下文；P0）
             # contextvar 按 asyncio task 隔离，任务结束自动清理，无需手动 clear
@@ -190,6 +210,7 @@ class ChatService:
         Returns:
             生成的标题文本
         """
+        chat_model = model_for('session_title', chat_model)
         try:
             from app.utils.prompt_loader import format_prompt
             from langchain_core.messages import HumanMessage
@@ -205,4 +226,6 @@ class ChatService:
             return title if title else user_message[:20]
         except Exception as e:
             logger.warning(f"LLM 生成标题失败: {e}")
+            from app.model_config.runtime import require_failure_policy
+            require_failure_policy('session_title','default_title')
             return user_message[:20].strip()

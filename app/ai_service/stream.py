@@ -8,12 +8,18 @@ yield 原始 dict，由调用方负责 SSE 格式化。
 """
 
 import asyncio
+from contextlib import aclosing
 import json
 import time
 from typing import AsyncGenerator, Dict, Any, Optional
 
 from app.ai_service.agent_middleware import default_middleware
 from app.core.logger_handler import logger
+from app.model_config.context_budget import ModelContextExceeded
+from app.model_config.task_budget import ModelBudgetDenied
+from app.ai_service.tool_results import artifact_file_event, normalize_tool_result, text_content
+from app.ai_service.tool_approvals import APPROVAL_TOOLS, approval_workflow
+from app.ai_service.email_dispatch import EMAIL_TOOL
 
 
 def _safe_str(value: Any, max_len: int = 500) -> str:
@@ -92,110 +98,151 @@ async def run_agent_stream(
     mw = middleware or default_middleware
     accumulated = ""
     tool_start_times: Dict[str, float] = {}
+    artifact_operations: dict[str, str] = {}
     consecutive_tool_calls = 0  # 连续工具调用计数（无 response 产出时递增）
 
     # 触发 before_agent 钩子
     messages = agent_input.get("messages", [])
     last_msg = messages[-1].content if messages else ""
     await mw.trigger("before_agent", {
-        "input": last_msg[:200],
+        "input": text_content(last_msg)[:200],
         "message_count": len(messages),
     })
 
     try:
         async with asyncio.timeout(timeout):
-            async for event in agent.astream_events(
+            async with aclosing(agent.astream_events(
                 agent_input,
                 config=config,
                 version="v2",
-            ):
-                event_type = event["event"]
+            )) as _owned_stream_0:
+                async for event in _owned_stream_0:
+                    event_type = event["event"]
 
-                # ---- 逐 token 输出 ----
-                if event_type == "on_chat_model_stream":
-                    chunk = event["data"].get("chunk")
-                    if chunk:
-                        # ★ 思考过程实时转发（审查 B+C：qwen thinking 模式的思考内容
-                        # 在 additional_kwargs.reasoning_content，chunk.content 为空——
-                        # 此前深度思考期间前端零反馈，用户误以为卡死而刷新/重试）
-                        reasoning = (getattr(chunk, "additional_kwargs", None) or {}).get("reasoning_content")
-                        if reasoning:
-                            yield {"type": "thinking", "stage": "thinking", "content": reasoning}
-                        if hasattr(chunk, "content") and chunk.content:
-                            accumulated += chunk.content
-                            consecutive_tool_calls = 0  # 有文本产出，重置计数
-                            yield {"type": "response", "content": chunk.content}
+                    # ---- 逐 token 输出 ----
+                    if event_type == "on_chat_model_stream":
+                        chunk = event["data"].get("chunk")
+                        if chunk:
+                            # ★ 思考过程实时转发（审查 B+C：qwen thinking 模式的思考内容
+                            # 在 additional_kwargs.reasoning_content，chunk.content 为空——
+                            # 此前深度思考期间前端零反馈，用户误以为卡死而刷新/重试）
+                            reasoning = (getattr(chunk, "additional_kwargs", None) or {}).get("reasoning_content")
+                            if reasoning:
+                                yield {"type": "thinking", "stage": "thinking", "content": reasoning}
+                            content = text_content(getattr(chunk, "content", ""))
+                            if content:
+                                accumulated += content
+                                consecutive_tool_calls = 0  # 有文本产出，重置计数
+                                yield {"type": "response", "content": content}
 
-                # ---- 工具调用开始 ----
-                elif event_type == "on_tool_start":
-                    tool_name = event.get("name", "unknown")
-                    consecutive_tool_calls += 1
-                    # 循环检测：连续工具调用超过上限且无任何文本产出
-                    if consecutive_tool_calls > max_consecutive_tool_calls:
-                        logger.warning(
-                            f"Agent 循环检测: 连续 {consecutive_tool_calls} 次工具调用无回复，强制终止"
-                        )
+                    # ---- 工具调用开始 ----
+                    elif event_type == "on_tool_start":
+                        tool_name = event.get("name", "unknown")
+                        run_id = str(event.get("run_id") or "")
+                        consecutive_tool_calls += 1
+                        # 循环检测：连续工具调用超过上限且无任何文本产出
+                        if consecutive_tool_calls > max_consecutive_tool_calls:
+                            logger.warning(
+                                f"Agent 循环检测: 连续 {consecutive_tool_calls} 次工具调用无回复，强制终止"
+                            )
+                            yield {
+                                "type": "error",
+                                "content": "抱歉，我在处理这个问题时遇到了困难（工具调用循环），请尝试换一种方式提问。",
+                            }
+                            return
+                        tool_start_times[run_id] = time.monotonic()
+                        logger.debug(f"工具调用开始: {tool_name} (连续第{consecutive_tool_calls}次)")
+                        await mw.trigger("before_tool", {
+                            "tool_name": tool_name,
+                            "run_id": run_id,
+                            "tool_call_id": event.get("metadata", {}).get("tool_call_id"),
+                            # 工具入参（截断，供工具审计 P2-3）
+                            "input": '[邮件内容保留在审批预览]' if tool_name == EMAIL_TOOL else _safe_str(event["data"].get("input")),
+                        })
+                        yield {"type": "tool_start", "name": tool_name, "run_id": run_id}
+
+                    # ---- 工具调用完成 ----
+                    elif event_type == "on_tool_end":
+                        tool_name = event.get("name", "unknown")
+                        run_id = str(event.get("run_id") or "")
+                        output = event["data"].get("output")
+                        tool_call_id = getattr(output, "tool_call_id", None)
+                        artifact = getattr(output, "artifact", None)
+                        operation = {}
+                        if tool_name in APPROVAL_TOOLS and isinstance(artifact, dict) and artifact.get("operation_id"):
+                            operation = {"operation_id": artifact["operation_id"], "replayed": artifact.get("replayed") is True}
+                        elif tool_call_id in artifact_operations:
+                            operation = {'operation_id': artifact_operations.pop(tool_call_id)}
+                        outcome = normalize_tool_result(output)
+                        duration = 0
+                        if run_id in tool_start_times:
+                            duration = round(
+                                (time.monotonic() - tool_start_times.pop(run_id)) * 1000
+                            )
+                        logger.debug(f"工具调用完成: {tool_name} ({duration}ms)")
+                        await mw.trigger("after_tool", {
+                            "tool_name": tool_name,
+                            "run_id": run_id,
+                            "tool_call_id": tool_call_id,
+                            **operation,
+                            "error_code": outcome.error_code,
+                            "duration_ms": duration,
+                            # 工具结果（截断，供工具审计 P2-3）
+                            "output": _safe_str(event["data"].get("output")),
+                            "success": outcome.success,
+                        })
+                        yield {"type": "tool_end", "name": tool_name, "run_id": run_id,
+                               "tool_call_id": tool_call_id, "duration_ms": duration,
+                               "error": not outcome.success, "error_code": outcome.error_code, **operation}
+
+                        # ★ PPT 工具输出检测（§6.3 第 1 段）：额外产出 tool_file 事件
+                        # 工具返回的 JSON（file_id/download_url/slide_count/title）直通前端
+                        tool_file = parse_tool_file_event(
+                            tool_name, event["data"].get("output"))
+                        if tool_file and outcome.success and approval_workflow.get() is None:
+                            yield tool_file
+
+                    elif event_type == 'on_custom_event' and event.get('name') == 'artifact_operation_reserved':
+                        reference = event['data']
+                        artifact_operations[reference['tool_call_id']] = reference['operation_id']
+
+                    elif event_type == 'on_custom_event' and event.get('name') == 'committed_tool_artifact':
+                        reference = event['data']
+                        file_event = artifact_file_event(reference.get('name'), reference, reference.get('operation_id'))
+                        if file_event is not None:
+                            yield file_event
+
+                    # ---- 工具调用失败 ----
+                    elif event_type == "on_tool_error":
+                        tool_name = event.get("name", "unknown")
+                        run_id = str(event.get("run_id") or "")
+                        duration = 0
+                        if run_id in tool_start_times:
+                            duration = round(
+                                (time.monotonic() - tool_start_times.pop(run_id)) * 1000
+                            )
+                        logger.warning(f"工具调用失败: {tool_name} ({duration}ms)")
+                        await mw.trigger("after_tool", {
+                            "tool_name": tool_name,
+                            "run_id": run_id,
+                            "tool_call_id": event.get("metadata", {}).get("tool_call_id"),
+                            "error_code": "TOOL_EXECUTION_ERROR",
+                            "duration_ms": duration,
+                            "output": _safe_str(event["data"].get("error")),
+                            "success": False,
+                        })
                         yield {
-                            "type": "error",
-                            "content": "抱歉，我在处理这个问题时遇到了困难（工具调用循环），请尝试换一种方式提问。",
+                            "type": "tool_end",
+                            "name": tool_name,
+                            "run_id": run_id,
+                            "error_code": "TOOL_EXECUTION_ERROR",
+                            "duration_ms": duration,
+                            "error": True,
                         }
-                        return
-                    tool_start_times[tool_name] = time.time()
-                    logger.debug(f"工具调用开始: {tool_name} (连续第{consecutive_tool_calls}次)")
-                    await mw.trigger("before_tool", {
-                        "tool_name": tool_name,
-                        # 工具入参（截断，供工具审计 P2-3）
-                        "input": _safe_str(event["data"].get("input")),
-                    })
-                    yield {"type": "tool_start", "name": tool_name}
 
-                # ---- 工具调用完成 ----
-                elif event_type == "on_tool_end":
-                    tool_name = event.get("name", "unknown")
-                    duration = 0
-                    if tool_name in tool_start_times:
-                        duration = round(
-                            (time.time() - tool_start_times.pop(tool_name)) * 1000
-                        )
-                    logger.debug(f"工具调用完成: {tool_name} ({duration}ms)")
-                    await mw.trigger("after_tool", {
-                        "tool_name": tool_name,
-                        "duration_ms": duration,
-                        # 工具结果（截断，供工具审计 P2-3）
-                        "output": _safe_str(event["data"].get("output")),
-                        "success": True,
-                    })
-                    yield {"type": "tool_end", "name": tool_name, "duration_ms": duration}
-
-                    # ★ PPT 工具输出检测（§6.3 第 1 段）：额外产出 tool_file 事件
-                    # 工具返回的 JSON（file_id/download_url/slide_count/title）直通前端
-                    tool_file = parse_tool_file_event(
-                        tool_name, event["data"].get("output"))
-                    if tool_file:
-                        yield tool_file
-
-                # ---- 工具调用失败 ----
-                elif event_type == "on_tool_error":
-                    tool_name = event.get("name", "unknown")
-                    duration = 0
-                    if tool_name in tool_start_times:
-                        duration = round(
-                            (time.time() - tool_start_times.pop(tool_name)) * 1000
-                        )
-                    logger.warning(f"工具调用失败: {tool_name} ({duration}ms)")
-                    await mw.trigger("after_tool", {
-                        "tool_name": tool_name,
-                        "duration_ms": duration,
-                        "output": _safe_str(event["data"].get("error")),
-                        "success": False,
-                    })
-                    yield {
-                        "type": "tool_end",
-                        "name": tool_name,
-                        "duration_ms": duration,
-                        "error": True,
-                    }
-
+    except (ModelBudgetDenied, ModelContextExceeded) as error:
+        yield error.stream_event()
+        return
     except asyncio.TimeoutError:
         logger.warning(f"Agent 响应超时 (timeout={timeout}s)")
         yield {"type": "error", "content": f"AI 响应超时（{timeout}秒），请重试"}

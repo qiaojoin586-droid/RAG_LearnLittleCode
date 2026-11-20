@@ -10,8 +10,11 @@ Plan-and-Execute Agent 执行引擎
 
 通过 SSE 事件流推送计划进度和中间结果给前端。
 """
+from app.model_config.runtime import model_for, template_for
+from app.model_config.snapshots import current_snapshot
 
 import asyncio
+from contextlib import aclosing
 import json
 import re
 import time
@@ -20,9 +23,17 @@ from datetime import datetime
 from typing import AsyncGenerator, Dict, Any, List, Optional
 
 from langchain_core.messages import HumanMessage, AIMessage, SystemMessage
+from app.ai_service.context_composer import compose_history,with_data
 
 from app.ai_service.tool_registry import tool_registry
 from app.core.logger_handler import logger
+from app.core.model_trace import trace_scope
+from app.core.failed_response import ErrorCode
+from app.ai_service.detached_chat import restrict_background_tools
+from app.ai_service.tool_approvals import approval_step
+from app.model_config.context_budget import ModelContextExceeded
+from app.model_config.task_budget import ModelBudgetDenied
+from app.ai_service.tool_results import text_content
 from app.utils.config import (
     get_plan_execute_config,
     get_reflection_config,
@@ -42,6 +53,7 @@ class PlanStep:
     tool: str  # 工具名或 "none"
     depends_on: List[int] = field(default_factory=list)
     result: str = ""  # 执行后填充
+    result_ready: bool = False
 
 
 @dataclass
@@ -68,7 +80,7 @@ _PLAN_TOOL_DESC = {
     "create_note_tool": "创建新笔记（支持 Markdown）",
     "update_note_tool": "更新已有笔记",
     "get_related_notes_tool": "获取关联笔记推荐",
-    "send_email": "发送邮件（笔记以 Markdown/PDF 附件发送到指定邮箱）",
+    "send_email": "提交邮件发送申请，等待用户核对收件人和内容后确认",
     "generate_ppt_tool": "根据选中的笔记生成可放映、可下载的讲解 PPT 文件（.pptx，工具返回下载链接；用户要求生成/制作 PPT、幻灯片、演示文稿时【必须】使用本工具，不要只输出文本大纲）",
 }
 
@@ -93,6 +105,7 @@ def _build_plan_tool_list() -> str:
     for name in tool_registry.resolve_names(["mcp"]):
         if name not in names:
             names.append(name)
+    names = restrict_background_tools(names)
     return "\n".join(
         f"{i + 1}. {name} - {_plan_tool_desc(name)}"
         for i, name in enumerate(names)
@@ -138,11 +151,12 @@ async def _generate_plan(
     Raises:
         ValueError: JSON 解析失败时抛出（调用方负责降级）
     """
+    plan_model = model_for('planner', plan_model)
     from app.utils.prompt_loader import load_prompt
 
     prompt_template = load_prompt("plan_generation")
     prompt = prompt_template.replace("{current_time}", datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
-    prompt = prompt.replace("{user_message}", user_message[:1000])
+    prompt = prompt.replace("{user_message}", user_message)
     # 动态注入工具清单（从 agent.yaml tool_groups 构建，与执行阶段工具集同步）
     prompt = prompt.replace("{tool_list}", _build_plan_tool_list())
 
@@ -159,7 +173,7 @@ async def _generate_plan(
 
     try:
         async with asyncio.timeout(plan_timeout):
-            response = await plan_model.ainvoke([HumanMessage(content=prompt)])
+            response = await plan_model.ainvoke(with_data([HumanMessage(content=prompt)]))
             content = response.content.strip()
     except asyncio.TimeoutError:
         logger.warning(f"Plan 生成超时 ({plan_timeout}s)")
@@ -179,15 +193,18 @@ async def _generate_plan(
     goal = data.get("goal", user_message[:50])
     raw_steps = data.get("steps", [])
 
-    if not raw_steps:
+    if not isinstance(raw_steps, list) or not raw_steps:
         raise ValueError("Plan 无步骤")
 
     # 限制最大步骤数
     max_steps = config.get("max_steps", 5)
-    raw_steps = raw_steps[:max_steps]
+    if len(raw_steps) > max_steps:
+        raise ValueError("Plan 超过最大步骤数，拒绝截断依赖图")
 
     steps = []
     for s in raw_steps:
+        if not isinstance(s, dict):
+            raise ValueError("Plan 步骤必须是对象")
         steps.append(PlanStep(
             step=s.get("step", len(steps) + 1),
             action=s.get("action", ""),
@@ -196,8 +213,33 @@ async def _generate_plan(
         ))
 
     plan = ExecutionPlan(goal=goal, steps=steps)
+    _validate_plan(plan)
     logger.info(f"Plan 生成完成: goal={goal}, steps={len(steps)}")
     return plan
+
+
+def _validate_plan(plan):
+    if not isinstance(plan.goal, str) or not plan.steps or len(plan.steps) > get_plan_execute_config().get('max_steps', 5):
+        raise ValueError('Plan 格式无效')
+    batches = _topological_batches(plan.steps)
+    allowed_tools = {name for names in get_tool_groups_config().values() for name in names}
+    allowed_tools.update(tool_registry.resolve_names(["mcp"]))
+    allowed_tools = set(restrict_background_tools(allowed_tools))
+    if any(step.tool != "none" and step.tool not in allowed_tools for step in plan.steps):
+        raise ValueError("Plan 包含未授权或未知工具")
+    return batches
+
+
+def read_saved_plan(checkpoint):
+    if checkpoint is None or not checkpoint.data:
+        return None
+    try:
+        stored = checkpoint.data['plan']
+        plan = ExecutionPlan(stored['goal'], [PlanStep(**step) for step in stored['steps']])
+        _validate_plan(plan)
+        return plan
+    except (KeyError, TypeError, ValueError):
+        return None
 
 
 # ============================================================
@@ -211,6 +253,24 @@ def _topological_batches(steps: List[PlanStep]) -> List[List[PlanStep]]:
     Returns:
         批次列表，每个批次内的步骤可并行执行
     """
+    ids = [step.step for step in steps]
+    if any(type(identifier) is not int or not 1 <= identifier <= 2**31 - 1 for identifier in ids):
+        raise ValueError("Plan 步骤 ID 必须是正整数")
+    if len(set(ids)) != len(ids):
+        raise ValueError("Plan 步骤 ID 重复")
+    known = set(ids)
+    for step in steps:
+        if not isinstance(step.action, str) or not step.action.strip():
+            raise ValueError("Plan 步骤缺少任务描述")
+        if not isinstance(step.tool, str) or not step.tool:
+            raise ValueError("Plan 工具名无效")
+        if not isinstance(step.depends_on, list) or any(
+            type(dep) is not int or dep not in known or dep == step.step
+            for dep in step.depends_on
+        ):
+            raise ValueError("Plan 包含无效、缺失或自引用依赖")
+        if len(step.depends_on) != len(set(step.depends_on)):
+            raise ValueError("Plan 依赖重复")
     completed = set()
     remaining = list(steps)
     batches = []
@@ -222,9 +282,7 @@ def _topological_batches(steps: List[PlanStep]) -> List[List[PlanStep]]:
             if all(d in completed for d in s.depends_on)
         ]
         if not batch:
-            # 存在循环依赖，强制顺序执行剩余步骤
-            logger.warning("检测到循环依赖，强制顺序执行剩余步骤")
-            batch = remaining
+            raise ValueError("Plan 存在循环依赖")
 
         batches.append(batch)
         for s in batch:
@@ -265,28 +323,35 @@ def _resolve_step_tool_groups(step: PlanStep) -> Optional[List[str]]:
     matched_groups = ["base"]  # 始终包含基础组
     group = tool_to_group.get(step.tool)
     if group is None:
-        # 工具名未匹配内置组：若为已注册的 MCP 动态工具 → 返回 base + mcp；
-        # 否则回退关键词路由（全量组），由 execute_agent 按 default_groups 加载，
-        # 避免步骤无工具可用（实施文档 §5.2 gap #2）
+        # Only registered MCP tools are eligible; unknown names cannot expand grants.
         if step.tool in tool_registry.resolve_names(["mcp"]):
             logger.debug(f"步骤 {step.step} 工具 '{step.tool}' 命中 MCP 动态工具 → 工具组 ['base', 'mcp']")
             return matched_groups + ["mcp"]
-        logger.warning(f"步骤 {step.step} 工具 '{step.tool}' 未匹配到任何工具组，回退关键词路由（全量组）")
-        return None
+        raise ValueError(f"步骤 {step.step} 使用未知工具")
     elif group != "base" and group not in matched_groups:
         matched_groups.append(group)
         logger.debug(f"步骤 {step.step} 工具路由: tool='{step.tool}' → 工具组 {matched_groups}")
-
-    # MCP 动态工具组：步骤执行始终携带已注册的 MCP 工具（实施文档 §5.2 gap #2 闭合；
-    # 未注册时 resolve_names(["mcp"]) 返回空列表，无副作用）
-    if tool_registry.resolve_names(["mcp"]):
-        matched_groups.append("mcp")
-        logger.debug(f"步骤 {step.step} 工具路由: 追加 MCP 动态工具组 → {matched_groups}")
 
     return matched_groups
 
 
 async def _execute_step(
+    step: PlanStep, *args, **kwargs,
+) -> AsyncGenerator[Dict[str, Any], None]:
+    with trace_scope(step_id=str(step.step)):
+        approval_token = approval_step.set(step.step)
+        stream = _execute_step_impl(step, *args, **kwargs)
+        try:
+            async for event in stream:
+                yield event
+        finally:
+            try:
+                await stream.aclose()
+            finally:
+                approval_step.reset(approval_token)
+
+
+async def _execute_step_impl(
     step: PlanStep,
     chat_model,
     user_id: str,
@@ -327,7 +392,6 @@ async def _execute_step(
     step_context = "\n".join(step_context_parts)
     step_system_prompt = (
         system_prompt
-        + f"\n\n---\n当前执行步骤上下文：\n{step_context}"
         + "\n\n步骤执行规则（必须遵守）：\n"
         + "1. 只完成当前步骤的任务，不要回答用户的完整问题（完整回答由综合阶段生成）；\n"
         + "2. 步骤结果只输出本步骤需要的数据（如搜索结果、笔记内容、统计数字），\n"
@@ -354,13 +418,13 @@ async def _execute_step(
             failed_tool = None
             error_event = None
             try:
-                async for event in execute_agent(
+                async with aclosing(execute_agent(
                     chat_model=chat_model,
                     user_id=user_id,
                     # 只给步骤 Agent 精简背景（截断），避免其针对完整问题输出完整回答
                     user_message=(
-                        f"用户请求（背景）：{user_message[:200]}\n\n"
-                        f"你的任务（只完成这一步，不要回答完整问题）：{step.action}"
+                        f"用户请求（背景）：{user_message}\n\n"
+                        f"你的任务（只完成这一步，不要回答完整问题）：\n{step_context}"
                         + repair_note
                     ),
                     system_prompt=step_system_prompt,
@@ -373,22 +437,23 @@ async def _execute_step(
                     timeout=step_timeout,
                     override_groups=step_tool_groups,
                     attachment_content=attachment_content,
-                ):
-                    event_type = event.get("type", "")
-                    # 跟踪流内最后失败的工具（供修复轮定向 + no_retry_tools 判定）
-                    if event_type == "tool_end" and event.get("error"):
-                        failed_tool = event.get("name")
-                    if event_type == "response":
-                        # 步骤输出是内部中间结果：只累计供 Synthesize 汇总，
-                        # 不直接透传（否则每个步骤都会把完整回答流式输出给用户，
-                        # 造成重复内容与 token 浪费）
-                        accumulated += event.get("content", "")
-                    elif event_type == "error":
-                        error_event = event  # 拦截：先决定是否重试
-                        break
-                    elif event_type in ("tool_start", "tool_end", "tool_file", "thinking"):
-                        # 仅透传进度类事件（工具状态/PPT 下载卡片对用户可见）
-                        yield event
+                )) as _owned_stream_9:
+                    async for event in _owned_stream_9:
+                        event_type = event.get("type", "")
+                        # 跟踪流内最后失败的工具（供修复轮定向 + no_retry_tools 判定）
+                        if event_type == "tool_end" and event.get("error"):
+                            failed_tool = event.get("name")
+                        if event_type == "response":
+                            # 步骤输出是内部中间结果：只累计供 Synthesize 汇总，
+                            # 不直接透传（否则每个步骤都会把完整回答流式输出给用户，
+                            # 造成重复内容与 token 浪费）
+                            accumulated += event.get("content", "")
+                        elif event_type == "error":
+                            error_event = event  # 拦截：先决定是否重试
+                            break
+                        elif event_type in ("tool_start", "tool_end", "tool_file", "thinking"):
+                            # 仅透传进度类事件（工具状态/PPT 下载卡片对用户可见）
+                            yield event
                     # stream_done 等其余事件不转发（步骤内部信息不外泄）
             except Exception as e:
                 logger.error(f"步骤 {step.step} 执行失败: {e}")
@@ -398,6 +463,9 @@ async def _execute_step(
                 break  # 本轮成功
 
             # 失败 → L2 判定：关闭 / no_retry_tools / 轮次耗尽 → 透传 error 终止
+            if error_event.get("retryable") is False or error_event.get("code") == ErrorCode.MODEL_CONTEXT_EXCEEDED:
+                yield error_event
+                return
             if not l2_enable or failed_tool in no_retry_tools or attempt >= max_repairs:
                 if failed_tool in no_retry_tools:
                     logger.warning(f"L2 修复跳过: 步骤 {step.step} 工具 {failed_tool} 在 no_retry_tools（避免副作用）")
@@ -433,10 +501,10 @@ async def _execute_step(
         # 不需要工具 → 直接 LLM 生成（输出仅作为内部步骤结果，不透传，
         # 最终回答由 Synthesize 阶段统一生成）
         try:
-            messages = list(compressed_messages or [])
+            messages = [SystemMessage(content=step_system_prompt), *compose_history(compressed_messages or [])]
             step_prompt = (
-                f"用户请求（背景）：{user_message[:200]}\n\n"
-                f"你的任务（只完成这一步，不要回答完整问题）：{step.action}"
+                f"用户请求（背景）：{user_message}\n\n"
+                f"你的任务（只完成这一步，不要回答完整问题）：\n{step_context}"
             )
             if attachment_content:
                 content = [{
@@ -450,12 +518,17 @@ async def _execute_step(
 
             accumulated = ""
             async with asyncio.timeout(step_timeout):
-                async for chunk in chat_model.astream(messages):
-                    if hasattr(chunk, "content") and chunk.content:
-                        accumulated += chunk.content
+                async with aclosing(chat_model.astream(messages)) as _owned_stream_8:
+                    async for chunk in _owned_stream_8:
+                        if hasattr(chunk, "content") and chunk.content:
+                            accumulated += text_content(chunk.content)
 
             step.result = accumulated[:500] if accumulated else f"步骤 {step.step} 完成"
+            step.result_ready = True
 
+        except (ModelBudgetDenied, ModelContextExceeded) as error:
+            yield error.stream_event()
+            return
         except asyncio.TimeoutError:
             step.result = f"步骤 {step.step} 超时"
             yield {"type": "response", "content": f"\n[步骤 {step.step} 超时]\n"}
@@ -488,25 +561,35 @@ async def _execute_batch(
     并行模式使用 asyncio.Queue 实时转发事件，确保前端能即时收到每个步骤的 token。
     """
     enable_parallel = config.get("enable_parallel", True)
+    # Unknown/dynamic tools are conservatively treated as writes. Until operations
+    # carry resource IDs (M2), serialize mixed/write batches to avoid lost writes.
+    read_only_tools = {
+        "none", "what_time_is_now", "get_user_info_tools", "search_notes_tool",
+        "get_note_content_tool", "get_note_stats_tool", "get_today_reviews_tool",
+        "get_related_notes_tool", "translate_text", "wolfram_calculate",
+    }
+    if any(step.tool not in read_only_tools for step in batch):
+        enable_parallel = False
     step_timeout = config.get("step_timeout", 90)  # 与 agent.yaml 对齐（P2-1 技术债务）
 
     if enable_parallel and len(batch) > 1:
         # 并行执行（asyncio.Queue 实时多路复用）
-        max_parallel = config.get("max_parallel_steps", 3)
+        max_parallel = max(1, int(config.get("max_parallel_steps", 3)))
         queue: asyncio.Queue = asyncio.Queue()
-        _SENTINEL = "DONE"
+        _SENTINEL = object()
 
         async def _consume_step(step: PlanStep):
             """消费单个步骤的生成器，将事件放入队列"""
             try:
-                async for event in _execute_step(
+                async with aclosing(_execute_step(
                     step, chat_model, user_id, user_message, system_prompt,
                     compressed_messages, db_session_factory, note_service,
                     review_service, email_service, ppt_service, step_timeout,
                     previous_results,
                     attachment_content=attachment_content,
-                ):
-                    await queue.put(event)
+                )) as _owned_stream_7:
+                    async for event in _owned_stream_7:
+                        await queue.put(event)
             except Exception as e:
                 logger.error(f"并行步骤 {step.step} 异常: {e}")
                 await queue.put({"type": "error", "content": f"步骤 {step.step} 异常: {e}"})
@@ -519,27 +602,31 @@ async def _execute_batch(
             tasks = [asyncio.create_task(_consume_step(step)) for step in sub_batch]
 
             # 实时从队列读取事件，直到所有步骤完成
-            completed_count = 0
-            while completed_count < len(tasks):
-                item = await queue.get()
-                if item is _SENTINEL:
-                    completed_count += 1
-                else:
-                    yield item
-
-            # 确保所有任务完成
-            await asyncio.gather(*tasks, return_exceptions=True)
+            try:
+                completed_count = 0
+                while completed_count < len(tasks):
+                    item = await queue.get()
+                    if item is _SENTINEL:
+                        completed_count += 1
+                    else:
+                        yield item
+            finally:
+                for task in tasks:
+                    if not task.done():
+                        task.cancel()
+                await asyncio.gather(*tasks, return_exceptions=True)
     else:
         # 顺序执行
         for step in batch:
-            async for event in _execute_step(
+            async with aclosing(_execute_step(
                 step, chat_model, user_id, user_message, system_prompt,
                 compressed_messages, db_session_factory, note_service,
                 review_service, email_service, ppt_service, step_timeout,
                 previous_results,
                 attachment_content=attachment_content,
-            ):
-                yield event
+            )) as _owned_stream_6:
+                async for event in _owned_stream_6:
+                    yield event
             previous_results[step.step] = step.result
 
 
@@ -623,7 +710,7 @@ def _build_synthesize_prompt(
     step_results_text = "\n\n".join(step_results_parts)
 
     prompt_template = load_prompt("plan_synthesize")
-    prompt = prompt_template.replace("{user_message}", user_message[:500])
+    prompt = prompt_template.replace("{user_message}", user_message)
     prompt = prompt.replace("{plan_summary}", plan_summary)
     prompt = prompt.replace("{step_results}", step_results_text)
 
@@ -652,7 +739,7 @@ async def _generate_answer_buffered(
     """
     非流式生成完整回答文本（反思路径专用）
 
-    消息构造与 _synthesize 一致：SystemMessage（system_prompt[:2000]）独立、
+    消息构造与 _synthesize 一致：独立 SystemMessage、
     HumanMessage 承载 prompt（审查 N-2）。本函数**不发出任何 SSE 事件**
     （纯文本生成，三轮审查 #4：降级时 plan_synthesize 由 _synthesize 延迟发出，
     不存在"重复事件"）。
@@ -667,6 +754,7 @@ async def _generate_answer_buffered(
     Raises:
         asyncio.TimeoutError: 生成超时（调用方负责降级兜底）
     """
+    chat_model = model_for('synthesize', chat_model, execution_model=chat_model)
     synthesize_timeout = config.get("synthesize_timeout", 60)  # 与 agent.yaml 对齐（P2-1 技术债务）
 
     prompt = _build_synthesize_prompt(
@@ -674,11 +762,11 @@ async def _generate_answer_buffered(
         critique=critique, previous_draft=previous_draft,
     )
     messages = [
-        SystemMessage(content=system_prompt[:2000]),
+        SystemMessage(content=system_prompt),
         HumanMessage(content=prompt),
     ]
     async with asyncio.timeout(synthesize_timeout):
-        response = await chat_model.ainvoke(messages)
+        response = await chat_model.ainvoke(with_data(messages))
 
     content = getattr(response, "content", "") or ""
     return str(content)
@@ -695,6 +783,7 @@ async def _synthesize(
     """
     汇总所有步骤结果，生成最终回答（原流式路径，行为与反思引入前一致）
     """
+    chat_model = model_for('synthesize', chat_model, execution_model=chat_model)
     yield {"type": "plan_synthesize", "content": "正在汇总结果..."}
 
     synthesize_timeout = config.get("synthesize_timeout", 60)  # 与 agent.yaml 对齐（P2-1 技术债务）
@@ -705,16 +794,19 @@ async def _synthesize(
         async with asyncio.timeout(synthesize_timeout):
             # 使用流式输出
             messages = [
-                SystemMessage(content=system_prompt[:2000]),
+                SystemMessage(content=system_prompt),
                 HumanMessage(content=prompt),
             ]
 
             accumulated = ""
-            async for chunk in chat_model.astream(messages):
-                if hasattr(chunk, "content") and chunk.content:
-                    accumulated += chunk.content
-                    yield {"type": "response", "content": chunk.content}
+            async with aclosing(chat_model.astream(with_data(messages))) as _owned_stream_5:
+                async for chunk in _owned_stream_5:
+                    if hasattr(chunk, "content") and chunk.content:
+                        accumulated += chunk.content
+                        yield {"type": "response", "content": chunk.content}
 
+    except ModelContextExceeded as error:
+        yield error.stream_event()
     except asyncio.TimeoutError:
         logger.warning(f"Synthesize 阶段超时 ({synthesize_timeout}s)")
         yield {"type": "response", "content": "\n\n[结果汇总超时，以上为已完成步骤的部分结果]"}
@@ -770,21 +862,25 @@ async def _synthesize_with_reflection(
         draft = await _generate_answer_buffered(
             chat_model, plan, results, user_message, system_prompt, config,
         )
+    except ModelContextExceeded:
+        raise
     except asyncio.TimeoutError:
         logger.warning("反思路径：初始草稿生成超时，降级 _synthesize 流式")
-        async for event in _synthesize(
+        async with aclosing(_synthesize(
             chat_model=chat_model, plan=plan, results=results,
             user_message=user_message, system_prompt=system_prompt, config=config,
-        ):
-            yield event
+        )) as _owned_stream_4:
+            async for event in _owned_stream_4:
+                yield event
         return
     except Exception as e:
         logger.error(f"反思路径：初始草稿生成失败，降级 _synthesize 流式: {e}")
-        async for event in _synthesize(
+        async with aclosing(_synthesize(
             chat_model=chat_model, plan=plan, results=results,
             user_message=user_message, system_prompt=system_prompt, config=config,
-        ):
-            yield event
+        )) as _owned_stream_3:
+            async for event in _owned_stream_3:
+                yield event
         return
 
     # 触发门槛：短回答不批判（零额外调用）
@@ -906,6 +1002,8 @@ async def execute_plan_agent(
     timeout: int = 120,
     attachment_content: Optional[List[dict]] = None,
     attachment_names: Optional[List[str]] = None,
+    checkpoint=None,
+    recovered_operations=None,
 ) -> AsyncGenerator[Dict[str, Any], None]:
     """
     Plan-and-Execute Agent 执行器
@@ -941,19 +1039,24 @@ async def execute_plan_agent(
         async with asyncio.timeout(total_timeout):
             start_time = time.monotonic()  # 反思预算检查基准（P0-1）
             # ===== Phase 1: Plan =====
-            try:
-                plan = await _generate_plan(
-                    plan_model, effective_message, system_prompt,
-                    attachment_names=attachment_names,
-                )
-            except (ValueError, Exception) as e:
-                # Plan 生成失败 → 降级为 ReAct
-                logger.warning(f"Plan 生成失败，降级为 ReAct: {e}")
-                yield {
-                    "type": "plan_fallback",
-                    "reason": str(e),
-                }
-                return
+            plan = read_saved_plan(checkpoint)
+            if plan is None:
+                try:
+                    plan = await _generate_plan(
+                        plan_model, effective_message, system_prompt,
+                        attachment_names=attachment_names,
+                    )
+                except Exception as e:
+                    from app.model_config.runtime import require_failure_policy
+                    require_failure_policy('planner','react_fallback')
+                    logger.warning(f"Plan 生成失败，降级为 ReAct: {e}")
+                    yield {"type": "plan_fallback", "reason": str(e)}
+                    return
+                if checkpoint is not None:
+                    await checkpoint.store_plan({'goal': plan.goal, 'steps': [
+                        {'step': step.step, 'action': step.action, 'tool': step.tool, 'depends_on': step.depends_on}
+                        for step in plan.steps
+                    ]})
 
             # 推送计划事件
             yield {
@@ -972,11 +1075,32 @@ async def execute_plan_agent(
             # ===== Phase 2: Execute ===== 
             previous_results: Dict[int, str] = {}      # 记录已完成步骤的结果
             batches = _topological_batches(plan.steps) # 拓扑排序批次
-
+            clean_results = {}
+            steps_by_id = {step.step: step for step in plan.steps}
             completed_steps = 0
-            for batch in batches:               # 逐批执行
-                async for event in _execute_batch(             # 异步执行批次
-                    batch=batch,
+            for batch in batches:
+                pending = []
+                checkpoint_inputs = {}
+                for step in batch:
+                    receipt = (recovered_operations or {}).get(step.step)
+                    result = receipt[0] if receipt is not None else None
+                    if receipt is None and checkpoint is not None and step.tool == 'none' and set(step.depends_on) <= clean_results.keys():
+                        dependencies = {dep: clean_results[dep] for dep in step.depends_on}
+                        checkpoint_inputs[step.step] = dependencies
+                        result = checkpoint.read_result(step.step, dependencies)
+                    if result is not None:
+                        if receipt is not None and receipt[1].get('file'):
+                            yield receipt[1]['file']
+                        previous_results[step.step] = result
+                        clean_results[step.step] = result
+                        completed_steps += 1
+                        yield {'type': 'plan_step_end', 'step': step.step, 'result': result[:200]}
+                    else:
+                        pending.append(step)
+                if not pending:
+                    continue
+                async with aclosing(_execute_batch(             # 异步执行批次
+                    batch=pending,
                     chat_model=chat_model,
                     user_id=user_id,
                     user_message=effective_message,
@@ -990,14 +1114,21 @@ async def execute_plan_agent(
                     config=config,                             # 配置字典
                     previous_results=previous_results,         # 已完成步骤结果
                     attachment_content=attachment_content,     # 附件多模态 blocks
-                ):
-                    yield event
-                    if event.get("type") == "plan_step_end":
-                        completed_steps += 1
+                )) as _owned_stream_2:
+                    async for event in _owned_stream_2:
+                        if event.get("type") == "plan_step_end":
+                            completed_steps += 1
+                            step = steps_by_id[event['step']]
+                            if step.step in checkpoint_inputs and step.result_ready:
+                                await checkpoint.store_result(step.step, step.result, checkpoint_inputs[step.step])
+                                clean_results[step.step] = step.result
+                        yield event
+                        if event.get('code') == ErrorCode.MODEL_BUDGET_EXCEEDED:
+                            return
 
             # ===== Phase 3+4: Synthesize + Reflect =====    汇总结果（+ 综合后自检 L1）
             if reflection_config.get("enable", False):
-                async for event in _synthesize_with_reflection(
+                async with aclosing(_synthesize_with_reflection(
                     chat_model=chat_model,
                     plan_model=plan_model,
                     plan=plan,
@@ -1007,19 +1138,21 @@ async def execute_plan_agent(
                     config=config,
                     reflection_config=reflection_config,
                     start_time=start_time,
-                ):
-                    yield event
+                )) as _owned_stream_1:
+                    async for event in _owned_stream_1:
+                        yield event
             else:
                 # 反思关闭：原流式路径（行为与改动前一致）
-                async for event in _synthesize(
+                async with aclosing(_synthesize(
                     chat_model=chat_model,
                     plan=plan,
                     results=previous_results,
                     user_message=effective_message,
                     system_prompt=system_prompt,
                     config=config,
-                ):
-                    yield event
+                )) as _owned_stream_0:
+                    async for event in _owned_stream_0:
+                        yield event
 
             # 完成事件
             yield {
@@ -1028,6 +1161,8 @@ async def execute_plan_agent(
                 "completed_steps": completed_steps,
             }
 
+    except (ModelBudgetDenied, ModelContextExceeded) as error:
+        yield error.stream_event()
     except asyncio.TimeoutError:
         logger.warning(f"Plan-and-Execute 总超时 ({total_timeout}s)")
         yield {"type": "error", "content": f"复杂任务执行超时（{total_timeout}秒），请简化请求后重试"}
