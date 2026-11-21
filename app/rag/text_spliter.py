@@ -1,37 +1,21 @@
 """
-文本切片器
-
-实现文档切片的核心逻辑，支持：
-- Markdown 结构感知分割：按标题层级切分章节，章节内再细切
-- 文档类型区分：Markdown / 纯文本 / PDF 各自采用合适策略
-- 真正语义合并：基于 embedding 余弦相似度合并相邻高度相似的片段
-- 递归字符分割：按段落 → 句子 → 字符逐级细分（LangChain）
+文档与笔记共用的切片器。每个新切片保留原文字符区间，
+Markdown 还记录章节及表格、代码块边界。
 """
 
 import re
-from dataclasses import dataclass
 from typing import List, Tuple
 
 from app.core.logger_handler import logger
 from app.utils.config import get_chroma_config
 
 
-@dataclass
-class _Chunk:
-    """切片数据（内部使用）"""
-    content: str
-    section_title: str = ""   # 所属章节标题，如 "## 安装指南"
-
-
 class TextSplitter:
     """
     文本切片器
 
-    根据文档类型自动选择最优分割策略：
-    - Markdown：按 #/##/###/#### 标题切分章节，章节内再细切
-    - 纯文本 / PDF：递归字符分割
-
-    可选语义合并：基于 embedding 余弦相似度合并相邻的高度相似片段。
+    文本优先按段落或句子切分，Markdown 按块切分，PDF 由调用方逐页传入。
+    历史文档重建仍可复用原有分割器。独立的语义合并方法仅处理文本列表。
     """
 
     def __init__(self, embed_model=None):
@@ -64,39 +48,43 @@ class TextSplitter:
         Returns:
             切片文本列表
         """
-        chunks = self._split_by_type(text, doc_type)
-        return [c.content if isinstance(c, _Chunk) else c for c in chunks]
+        return [content for content, _ in self.split_with_positions(text, doc_type)]
 
-    def split_with_sections(
-        self, text: str, doc_type: str = "txt"
-    ) -> Tuple[List[str], List[dict]]:
-        """
-        同步分割文本，返回切片内容及其章节元数据
+    def split_with_sections(self, text: str, doc_type: str = "txt") -> Tuple[List[str], List[dict]]:
+        chunks = self.split_with_positions(text, doc_type)
+        return ([content for content, _ in chunks],
+                [{**span, 'chunk_index': i} for i, (_, span) in enumerate(chunks)])
 
-        Args:
-            text:     待分割的文本
-            doc_type: 文档类型（"md" / "txt" / "pdf"）
+    def split_with_positions(self, text: str, doc_type: str) -> list[tuple[str, dict]]:
+        """Slice the exact source within each structural region and size limit."""
+        from app.rag.structure import markdown_regions, region_spans
 
-        Returns:
-            (contents, metadatas) 元组
-            - contents:  切片文本列表
-            - metadatas: 补充元数据（含 section_title / chunk_index）
-        """
-        chunks = self._split_by_type(text, doc_type)
-        contents, metadatas = [], []
+        regions = markdown_regions(text) if doc_type.lower().removeprefix('text/') in ('md', 'markdown') else [
+            (0, len(text), '', 'text')]
+        chunks = []
+        for start, end, title, kind in regions:
+            for left, right in region_spans(text, start, end, kind, self.chunk_size, self.chunk_overlap):
+                span = {'section_title': title, 'block_kind': kind, 'char_start': left, 'char_end': right}
+                if kind in ('code', 'table'):
+                    span.update(block_start=start, block_end=end)
+                chunks.append((text[left:right], span))
+        return chunks
 
-        for i, chunk in enumerate(chunks):
-            if isinstance(chunk, _Chunk):
-                contents.append(chunk.content)
-                metadatas.append({
-                    "section_title": chunk.section_title,
-                    "chunk_index": i,
-                })
-            else:
-                contents.append(chunk)
-                metadatas.append({"section_title": "", "chunk_index": i})
-
-        return contents, metadatas
+    def split_legacy_positions(self, text: str, doc_type: str) -> list[tuple[str, dict]]:
+        """Locate each excerpt in its original section using Python character offsets."""
+        sections = self._parse_markdown_sections(text) if doc_type in ('md', 'markdown') else []
+        splitter = self._generic_splitter(add_start_index=True)
+        positions = []
+        for section in sections or [{'start': 0, 'end': len(text), 'title': ''}]:
+            base = section['start']
+            for chunk in splitter.create_documents([text[base:section['end']]]):
+                offset = chunk.metadata['start_index']
+                content = chunk.page_content
+                if offset < 0 or text[base + offset:base + offset + len(content)] != content:
+                    raise ValueError('Could not locate the document excerpt')
+                positions.append((content, {'section_title': section['title'], 'char_start': base + offset,
+                                            'char_end': base + offset + len(content)}))
+        return positions
 
     async def async_split_text(
         self, text: str, doc_type: str = "txt"
@@ -104,7 +92,8 @@ class TextSplitter:
         """异步分割文本（线程池包装，向后兼容）"""
         import asyncio
         loop = asyncio.get_event_loop()
-        return await loop.run_in_executor(None, self.split_text, text, doc_type)
+        import contextvars
+        return await loop.run_in_executor(None, contextvars.copy_context().run,self.split_text, text, doc_type)
 
     async def async_split_with_sections(
         self, text: str, doc_type: str = "txt"
@@ -112,9 +101,8 @@ class TextSplitter:
         """异步分割文本，返回内容及章节元数据"""
         import asyncio
         loop = asyncio.get_event_loop()
-        return await loop.run_in_executor(
-            None, self.split_with_sections, text, doc_type
-        )
+        import contextvars
+        return await loop.run_in_executor(None,contextvars.copy_context().run,self.split_with_sections,text,doc_type)
 
     def merge_similar_chunks(self, chunks: List[str]) -> List[str]:
         """
@@ -129,6 +117,10 @@ class TextSplitter:
         Returns:
             合并后的切片列表
         """
+        from app.model_config.snapshots import current_snapshot
+        if current_snapshot() is not None:
+            from app.model_config.errors import fail
+            fail(50305,'SYNC_SEMANTIC_MERGE_UNSUPPORTED',503)
         if not chunks or len(chunks) < 2:
             return chunks
 
@@ -172,61 +164,8 @@ class TextSplitter:
     # 文档类型路由
     # ================================================================
 
-    def _split_by_type(self, text: str, doc_type: str) -> List:
-        """
-        根据文档类型选择分割策略
-
-        Markdown 走结构感知分割；其他类型走通用递归字符分割。
-        """
-        doc_type = doc_type.lower().replace("text/", "")
-        if doc_type in ("md", "markdown"):
-            return self._split_markdown(text)
-        return self._split_generic(text)
-
-    # ================================================================
-    # Markdown 结构感知分割
-    # ================================================================
-
-    # 匹配 Markdown 标题行：# 到 ####
+    # Reproduce pre-manifest document boundaries when rebuilding historical indexes.
     _HEADING_RE = re.compile(r'^(#{1,4})\s+(.+)$', re.MULTILINE)
-
-    def _split_markdown(self, text: str) -> List[_Chunk]:
-        """
-        Markdown 结构感知分割
-
-        步骤：
-        1. 扫描所有 #/##/###/#### 标题行，将文档切分为逻辑章节
-        2. 每个章节段落内用 RecursiveCharacterTextSplitter 细切
-        3. 每个切片携带所属章节标题
-
-        如果文档完全没有标题，退化为通用分割。
-        """
-        sections = self._parse_markdown_sections(text)
-
-        if not sections:
-            raw = self._split_generic(text)
-            return [_Chunk(content=c) for c in raw]
-
-        all_chunks: List[_Chunk] = []
-
-        for sec in sections:
-            section_text = text[sec["start"]:sec["end"]]
-            if not section_text.strip():
-                continue
-
-            sub_chunks = self._split_generic(section_text)
-            for sub in sub_chunks:
-                content = sub.strip()
-                if content:
-                    all_chunks.append(_Chunk(
-                        content=content,
-                        section_title=sec["title"],
-                    ))
-
-        logger.debug(
-            f"Markdown 分割完成: {len(sections)} 个章节 → {len(all_chunks)} 个片段"
-        )
-        return all_chunks
 
     def _parse_markdown_sections(self, text: str) -> List[dict]:
         """
@@ -277,17 +216,10 @@ class TextSplitter:
     # 通用递归字符分割
     # ================================================================
 
-    def _split_generic(self, text: str) -> List[str]:
-        """
-        通用递归字符分割
-
-        分隔符优先级从高到低：
-        多空行 → 段落 → 换行 → 中文句号 → 英文句号+空格 →
-        感叹号 → 问号 → 分号 → 逗号 → 空格（最终兜底）
-        """
+    def _generic_splitter(self, *, add_start_index=False):
         from langchain_text_splitters import RecursiveCharacterTextSplitter
 
-        splitter = RecursiveCharacterTextSplitter(
+        return RecursiveCharacterTextSplitter(
             chunk_size=self.chunk_size,
             chunk_overlap=self.chunk_overlap,
             separators=[
@@ -303,11 +235,8 @@ class TextSplitter:
                 " ",                # 空格（最终兜底）
             ],
             length_function=len,
+            add_start_index=add_start_index,
         )
-
-        chunks = splitter.split_text(text)
-        logger.debug(f"通用分割: {len(text)} 字 → {len(chunks)} 个片段")
-        return chunks
 
     # ================================================================
     # 工具方法

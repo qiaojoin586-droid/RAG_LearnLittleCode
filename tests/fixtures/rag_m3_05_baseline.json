@@ -1,0 +1,28 @@
+{
+  "version": 1,
+  "top_k": 5,
+  "corpus": {
+    "1": "AX-900 控制器复位时按住 RST 三秒。",
+    "2": "AX-9000 控制器使用维护菜单重启。",
+    "3": "QX-42 的额定输入电压为 24V。",
+    "4": "接口 refresh_token_v2 会轮换会话凭据。",
+    "5": "接口 refresh_token_v20 仅用于沙盒。",
+    "6": "校验请求需要 request_id 并记录审计事件。",
+    "7": "更换冷却液后，检查轴承温度。",
+    "8": "泵站液位过低时补液。",
+    "9": "管理员可撤销访问令牌。",
+    "10": "账户安全页要求启用双因素认证。",
+    "11": "废弃指标停止计费后进入归档。",
+    "12": "备份文件存储于异地冷存储区域。"
+  },
+  "questions": [
+    {"kind": "model", "query": "AX-900 怎么复位", "relevant": ["1"], "vector_ranking": ["2", "8", "10", "11", "12", "1"]},
+    {"kind": "model", "query": "QX-42 接多少伏", "relevant": ["3"], "vector_ranking": ["8", "3", "7", "10", "12"]},
+    {"kind": "code", "query": "refresh_token_v2 做什么", "relevant": ["4"], "vector_ranking": ["5", "4", "9", "10", "6"]},
+    {"kind": "code", "query": "request_id", "relevant": ["6"], "vector_ranking": ["4", "12", "11", "7", "1", "6"]},
+    {"kind": "chinese", "query": "冷却液", "relevant": ["7"], "vector_ranking": ["8", "7", "3", "2"]},
+    {"kind": "chinese", "query": "液位", "relevant": ["8"], "vector_ranking": ["8", "7", "9"]},
+    {"kind": "paraphrase", "query": "如何让登录凭证失效", "relevant": ["9"], "vector_ranking": ["9", "4", "5", "10"]},
+    {"kind": "paraphrase", "query": "如何启用登录二次校验", "relevant": ["10"], "vector_ranking": ["10", "9", "6"] }
+  ]
+}
