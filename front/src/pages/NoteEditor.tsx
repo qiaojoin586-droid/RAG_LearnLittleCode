@@ -54,6 +54,7 @@ export default function NoteEditor({ note, initialFormat, onCreated, onUpdated, 
   const [title, setTitle] = useState(note?.title ?? '');
   const [content, setContent] = useState(() => {
     const raw = note?.content ?? '';
+    if (isTxt) return raw;
     // 兼容旧数据：如果内容是 HTML，自动转换为 Markdown；
     // 再归一化（剥外层围栏/CRLF），避免整篇被渲染为代码块
     return normalizeNoteContent(isHtml(raw) ? htmlToMarkdown(raw) : raw);
@@ -64,6 +65,9 @@ export default function NoteEditor({ note, initialFormat, onCreated, onUpdated, 
   const [categoryId, setCategoryId] = useState(note?.category_id ?? '');
   const { categories, fetchCategories } = useCategoryStore();
   const [isPinned, setIsPinned] = useState(note?.is_pinned ?? false);
+  const savedIndexPreference = note?.is_indexed ?? true;
+  const [indexPreference, setIndexPreference] = useState<boolean | null>(null);
+  const isIndexed = indexPreference ?? savedIndexPreference;
   const [editorMode, setEditorMode] = useState<EditorMode>('split');
   const textareaRef = useRef<HTMLTextAreaElement>(null);
 
@@ -77,14 +81,16 @@ export default function NoteEditor({ note, initialFormat, onCreated, onUpdated, 
       if (note) {
         const res = await notesApi.update(note.id, {
           title, content, tags, category_id: categoryId || null, is_pinned: isPinned,
+          ...(isIndexed !== savedIndexPreference && { is_indexed: isIndexed }),
         });
+        setIndexPreference(null);
         toast.success('保存成功');
         onUpdated(res.data.data);
       } else {
         // 新建时写入所选文档类型（md/txt）
         const res = await notesApi.create({
           title, content, tags, category_id: categoryId || undefined, is_pinned: isPinned,
-          format: noteFormat,
+          format: noteFormat, is_indexed: isIndexed,
         });
         toast.success('创建成功');
         onCreated(res.data.data);
@@ -385,6 +391,17 @@ export default function NoteEditor({ note, initialFormat, onCreated, onUpdated, 
               className="rounded"
             />
             {t('note.pinned')}
+          </label>
+        </div>
+        <div className="flex items-end">
+          <label className="flex cursor-pointer items-center gap-2 text-sm text-[var(--color-text-secondary)]">
+            <input
+              type="checkbox"
+              checked={isIndexed}
+              onChange={(e) => setIndexPreference(e.target.checked === savedIndexPreference ? null : e.target.checked)}
+              className="rounded accent-[var(--color-accent)] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--color-accent)]"
+            />
+            {t('note.indexed')}
           </label>
         </div>
       </div>

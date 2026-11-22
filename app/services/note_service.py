@@ -10,6 +10,8 @@
 - 批量操作
 - Markdown 导出
 """
+from app.model_config.runtime import model_for, template_for
+from app.model_config.snapshots import current_snapshot
 
 import asyncio
 import json
@@ -17,6 +19,8 @@ import os
 import re
 import time
 import uuid
+from collections.abc import Awaitable, Callable
+from functools import partial
 
 from typing import List, Optional, Tuple
 
@@ -29,7 +33,9 @@ from app.core.task_runner import spawn_background_task
 from app.models.note import Note
 from app.models.category import NoteCategory
 from app.models.review import ReviewRecord
+from app.rag.note_index import load_visible_notes, candidate_note_locator, queue_note_index
 from app.schemas.note import NoteCreate, NoteUpdate
+from app.utils.time_utils import utc_now
 
 
 # "未分类"过滤哨兵值（与前端保持一致）：
@@ -57,7 +63,7 @@ class NoteService:
     笔记服务类
     
     核心设计：
-    - 向量双写：笔记创建/更新时先写 MySQL → 异步写入 ChromaDB
+    - 向量索引：笔记与索引任务同事务提交，由 Worker 写入 ChromaDB
     - 异步自动标签：保存后立即返回，后台调用 LLM 生成标签和分类
     - 语义搜索：ChromaDB 检索 → 提取 note_id → MySQL 回填完整数据
     """
@@ -76,15 +82,16 @@ class NoteService:
         self.autocomplete_model = autocomplete_model
     
     async def create_note(
-        self, db: AsyncSession, user_id: str, note_data: NoteCreate
+        self, db: AsyncSession, user_id: str, note_data: NoteCreate, *,
+        after_commit: list[Callable[[], Awaitable[None]]] | None = None,
     ) -> Note:
         """
         创建笔记
         
         流程：
         1. 写入 MySQL
-        2. 异步写入 ChromaDB（向量双写）
-        3. 后台异步生成标签和创建回顾记录
+        2. 在同一事务写入索引任务和回顾记录
+        3. 后台异步生成标签
         
         Args:
             db: 数据库会话
@@ -102,6 +109,7 @@ class NoteService:
             tags=note_data.tags or [],
             category=note_data.category,
             is_pinned=note_data.is_pinned,
+            is_indexed=note_data.is_indexed,
             # 文档类型（md/txt）：仅新建时写入；AI 工具不传时默认 'md'
             format=note_data.format or 'md',
         )
@@ -117,21 +125,28 @@ class NoteService:
         
         # 刷新对象以加载数据库生成的字段（created_at, updated_at 等 server_default 值）
         await db.refresh(note)
-        
-        # 异步写入 ChromaDB（失败不影响主流程）
-        # 注意（审查 M9 遗留）：任务内传递已提交的 ORM 对象，依赖 expire_on_commit=False；
-        # 后续改造为传 note_id 重新查询
-        if self.vector_store:
-            spawn_background_task(self._sync_to_vector(note), name="note_sync_vector")
-            logger.info(f"ChromaDB 异步写入任务已创建: note_id={note.id}")
 
-        # 后台异步生成标签和创建回顾记录（不传入 db，因为请求 session 会在响应返回后关闭）
-        spawn_background_task(self._auto_tag_and_review(note), name="note_auto_tag")
+        # A review is durable business data: commit it with the note, independently
+        # of optional AI tagging or admission to the background queue.
+        db.add(ReviewRecord(note_id=note.id, user_id=user_id, review_count=0,
+                            interval_days=1, next_review_at=func.now()))
+        await db.flush()
+        if note.is_indexed:
+            await queue_note_index(db, note, 'upsert')
         
+        if after_commit is None:
+            await self._schedule_created_note(note)
+        else:
+            after_commit.append(partial(self._schedule_created_note, note))
         logger.info(f"笔记创建成功: note_id={note.id}, user_id={user_id}")
         return note
+
+    async def _schedule_created_note(self, note: Note) -> None:
+        task = spawn_background_task(self._auto_tag_note(note), name="note_auto_tag")
+        if task is None:
+            logger.warning("可选标签任务因容量不足跳过；回顾记录随笔记事务保存")
     
-    async def get_note(self, db: AsyncSession, note_id: str, user_id: str) -> Note:
+    async def get_note(self, db: AsyncSession, note_id: str, user_id: str, *, lock: bool = False) -> Note:
         """
         获取单个笔记（带权限校验）
         
@@ -146,11 +161,12 @@ class NoteService:
         Raises:
             BusinessError: 笔记不存在或无权访问
         """
-        result = await db.execute(
-            select(Note).where(
-                and_(Note.id == note_id, Note.user_id == user_id, Note.deleted_at.is_(None))
-            )
+        statement = select(Note).where(
+            Note.id == note_id, Note.user_id == user_id, Note.deleted_at.is_(None),
         )
+        if lock:
+            statement = statement.with_for_update().execution_options(populate_existing=True)
+        result = await db.execute(statement)
         note = result.scalar_one_or_none()
         
         if not note:
@@ -252,12 +268,12 @@ class NoteService:
         return notes, total
     
     async def update_note(
-        self, db: AsyncSession, note_id: str, user_id: str, note_data: NoteUpdate
+        self, db: AsyncSession, note_id: str, user_id: str, note_data: NoteUpdate,
     ) -> Note:
         """
         更新笔记
         
-        更新后同步更新 ChromaDB 向量。
+        标题或正文变更时提交新的索引任务。
         
         Args:
             db: 数据库会话
@@ -268,7 +284,7 @@ class NoteService:
         Returns:
             更新后的笔记对象
         """
-        note = await self.get_note(db, note_id, user_id)
+        note = await self.get_note(db, note_id, user_id, lock=True)
 
         # 更新字段
         update_data = note_data.model_dump(exclude_unset=True)
@@ -282,6 +298,9 @@ class NoteService:
                 # 显式 None 且未同时提供字符串 → 清空两字段；
                 # 若同时提供了字符串（AI 工具未匹配分类的降级场景），保留字符串
                 update_data["category"] = None
+        eligibility_changed = 'is_indexed' in update_data and update_data['is_indexed'] != note.is_indexed
+        reindex = any(field in update_data and update_data[field] != getattr(note, field)
+                      for field in ('title', 'content'))
         for field, value in update_data.items():
             setattr(note, field, value)
         
@@ -291,11 +310,8 @@ class NoteService:
         # 不 refresh 的话，后续响应序列化时在 greenlet 外触发 SELECT → MissingGreenlet）
         await db.refresh(note)
 
-        # 同步更新 ChromaDB 向量
-        if self.vector_store:
-            logger.info(f"创建异步写入任务: note_id={note.id}")
-            spawn_background_task(self._sync_to_vector(note), name="note_update_sync_vector")
-        
+        if eligibility_changed or (reindex and note.is_indexed):
+            await queue_note_index(db, note, 'upsert' if note.is_indexed else 'delete')
         logger.info(f"笔记更新: note_id={note_id}")
         return note
     
@@ -304,7 +320,7 @@ class NoteService:
         软删除笔记（设置 deleted_at）
 
         使用直接 SQL UPDATE 而非 ORM 对象修改，确保变更可靠持久化。
-        同时从 ChromaDB 中删除对应向量。
+        同时记录持久的向量清理任务。
 
         Args:
             db: 数据库会话
@@ -312,7 +328,7 @@ class NoteService:
             user_id: 用户 ID
         """
         # 先验证笔记存在（权限校验 + 确保未删除）
-        note = await self.get_note(db, note_id, user_id)
+        note = await self.get_note(db, note_id, user_id, lock=True)
 
         # 直接 SQL UPDATE —— 绕过 ORM flush 的对象状态跟踪，
         # 确保 UPDATE 语句一定被发送到数据库连接
@@ -325,13 +341,7 @@ class NoteService:
         if result.rowcount == 0:
             raise BusinessError(code=ErrorCode.NOTE_NOT_FOUND, http_status=404)
 
-        # 从 ChromaDB 删除向量
-        if self.vector_store:
-            try:
-                await self.vector_store.delete_note_vectors(note_id)
-                logger.info(f"ChromaDB 向量删除成功: note_id={note_id}")
-            except Exception as e:
-                logger.error(f"ChromaDB 向量删除失败: note_id={note_id}, error={e}")
+        await queue_note_index(db, note, 'delete')
 
         logger.info(f"笔记软删除: note_id={note_id}")
 
@@ -371,15 +381,7 @@ class NoteService:
 
     async def restore_note(self, db: AsyncSession, note_id: str, user_id: str) -> Note:
         """
-        从回收站恢复笔记（清除 deleted_at + 重建 ChromaDB 向量）
-
-        流程：
-        1. 查询笔记（验证 user_id 归属 + deleted_at IS NOT NULL）
-        2. UPDATE deleted_at = NULL
-        3. 重建 ChromaDB 向量 —— 写入格式必须与 _sync_to_vector 完全一致
-           （ids=f"note_{note.id}"、metadata 含 user_id/note_id/title/category），
-           否则 delete_note_vectors / search_notes 无法正确定位
-        4. 若向量重建失败：记录 error 日志，不阻塞恢复（向量可由后续任务补建）
+        从回收站恢复笔记并提交索引重建任务。
 
         Args:
             db: 数据库会话
@@ -396,7 +398,7 @@ class NoteService:
         result = await db.execute(
             select(Note).where(
                 and_(Note.id == note_id, Note.user_id == user_id, Note.deleted_at.isnot(None))
-            )
+            ).with_for_update().execution_options(populate_existing=True)
         )
         note = result.scalar_one_or_none()
         if not note:
@@ -409,24 +411,8 @@ class NoteService:
         # 回读数据库生成的 updated_at（func.now() 为 SQL 表达式，见 update_note 注释）
         await db.refresh(note)
 
-        # 3. 重建 ChromaDB 向量（与 _sync_to_vector 完全一致）
-        if self.vector_store:
-            try:
-                await self.vector_store.upsert_document(
-                    documents=[note.content or note.title],
-                    metadatas=[{
-                        "user_id": note.user_id,
-                        "note_id": note.id,
-                        "title": note.title,
-                        "category": note.category or "",
-                    }],
-                    ids=[f"note_{note.id}"],
-                    collection="notes",
-                )
-                logger.info(f"回收站笔记恢复，向量重建完成: note_id={note.id}")
-            except Exception as e:
-                # 向量重建失败不阻塞恢复（笔记已恢复，向量可由定时修复任务补建）
-                logger.error(f"恢复笔记向量重建失败: note_id={note.id}, error={e}")
+        if note.is_indexed:
+            await queue_note_index(db, note, 'upsert')
 
         logger.info(f"笔记恢复: note_id={note_id}")
         return note
@@ -451,18 +437,13 @@ class NoteService:
         result = await db.execute(
             select(Note).where(
                 and_(Note.id == note_id, Note.user_id == user_id, Note.deleted_at.isnot(None))
-            )
+            ).with_for_update().execution_options(populate_existing=True)
         )
         note = result.scalar_one_or_none()
         if not note:
             raise BusinessError(code=ErrorCode.NOTE_NOT_FOUND, http_status=404)
 
-        # 2. 删除 ChromaDB 向量（若存在）
-        if self.vector_store:
-            try:
-                await self.vector_store.delete_note_vectors(note_id)
-            except Exception as e:
-                logger.error(f"彻底删除时向量删除失败: note_id={note_id}, error={e}")
+        await queue_note_index(db, note, 'delete')
 
         # 3. 物理删除（ORM 级联删除 review_records）
         await db.delete(note)
@@ -483,29 +464,22 @@ class NoteService:
         Returns:
             本次物理删除的笔记数量
         """
-        from datetime import datetime, timedelta
+        from datetime import timedelta
 
-        cutoff = datetime.now() - timedelta(days=days)
+        cutoff = utc_now() - timedelta(days=days)
 
         result = await db.execute(
             select(Note).where(
                 and_(Note.deleted_at.isnot(None), Note.deleted_at < cutoff)
-            )
+            ).order_by(Note.id).with_for_update().execution_options(populate_existing=True)
         )
         expired = list(result.scalars().all())
         if not expired:
             return 0
 
-        # 删除 ChromaDB 向量
-        if self.vector_store:
-            for note in expired:
-                try:
-                    await self.vector_store.delete_note_vectors(note.id)
-                except Exception as e:
-                    logger.warning(f"清理过期向量失败: note_id={note.id}, error={e}")
-
         # 物理删除（ORM 级联删除 review_records）
         for note in expired:
+            await queue_note_index(db, note, 'delete')
             await db.delete(note)
         await db.flush()
 
@@ -643,42 +617,28 @@ class NoteService:
         Returns:
             [(Note, score), ...] 按相似度降序排列
         """
-        if not self.vector_store:
+        if not self.vector_store or top_k < 1:
             return []
-        
-        # ChromaDB 检索
-        results = await self.vector_store.search_notes(
-            query=query, user_id=user_id, top_k=top_k
-        )
-        
-        if not results:
-            return []
-        
-        # 提取 note_id 和分数
-        note_ids = [r["note_id"] for r in results]
-        score_map = {r["note_id"]: r["score"] for r in results}
-        
-        # MySQL 批量查询
-        result = await db.execute(
-            select(Note).where(
-                and_(
-                    Note.id.in_(note_ids),
-                    Note.user_id == user_id,
-                    Note.deleted_at.is_(None)
-                )
-            )
-        )
-        
-        notes = result.scalars().all()
-        
-        # 按相似度排序
-        sorted_results = [
-            (note, score_map.get(note.id, 0.0))
-            for note in notes
-        ]
-        sorted_results.sort(key=lambda x: x[1], reverse=True)
 
-        return sorted_results
+        limit = top_k
+        while True:
+            results = await self.vector_store.search_notes(query=query, user_id=user_id, top_k=limit)
+            notes = await load_visible_notes(db, user_id, [entry['note_id'] for entry in results])
+            best = {}
+            duplicate = False
+            for entry in results:
+                row = notes.get(entry['note_id'])
+                if not candidate_note_locator(entry, row):
+                    continue
+                key = row[0].id
+                if key in best:
+                    duplicate = True
+                if key not in best or entry['score'] > best[key][1]:
+                    best[key] = (row[0], entry['score'])
+            if len(best) >= top_k or len(results) < limit or not duplicate:
+                return sorted(best.values(), key=lambda entry: entry[1], reverse=True)[:top_k]
+            # A long note can occupy the entire first page of vector hits.
+            limit *= 2
 
     async def keyword_search(
         self, db: AsyncSession, user_id: str, query: str, top_k: int = 5
@@ -790,36 +750,9 @@ class NoteService:
 
         return results
 
-    async def _sync_to_vector(self, note: Note) -> None:
+    async def _auto_tag_note(self, note: Note) -> None:
         """
-        异步同步笔记到 ChromaDB 向量库（notes_collection）
-
-        失败时记录日志，不影响主流程。
-        注意：ChromaDB 元数据仅支持标量值，tags 列表不入元数据；
-        检索端 search_notes 依赖 metadata 中的 user_id（隔离）和 note_id（关联）。
-
-        Args:
-            note: 笔记对象
-        """
-        try:
-            await self.vector_store.upsert_document(
-                documents=[note.content or note.title],
-                metadatas=[{
-                    "user_id": note.user_id,
-                    "note_id": note.id,
-                    "title": note.title,
-                    "category": note.category or "",
-                }],
-                ids=[f"note_{note.id}"],
-                collection="notes",
-            )
-            logger.debug(f"笔记向量同步完成: note_id={note.id}")
-        except Exception as e:
-            logger.error(f"向量同步失败: note_id={note.id}, error={e}")
-    
-    async def _auto_tag_and_review(self, note: Note) -> None:
-        """
-        后台异步任务：自动标签生成 + 创建回顾记录
+        可选后台自动标签；回顾记录在 create_note 的数据库事务内创建。
         
         使用独立的数据库会话，避免依赖已关闭的请求 session。
         
@@ -832,21 +765,7 @@ class NoteService:
             if tags:
                 await self._persist_note_tags(note.id, tags)
 
-            # 2. 创建回顾记录（艾宾浩斯遗忘曲线）
-            from app.db.database import async_session_factory
-            
-            async with async_session_factory() as new_session:
-                review = ReviewRecord(
-                    note_id=note.id,
-                    user_id=note.user_id,
-                    review_count=0,
-                    interval_days=1,
-                    next_review_at=func.now(),  # 立即可回顾
-                )
-                new_session.add(review)
-                await new_session.commit()
-                
-            logger.info(f"自动标签和回顾记录创建完成: note_id={note.id}, tags={tags}")
+            logger.info(f"自动标签完成: note_id={note.id}, tags={tags}")
             
         except Exception as e:
             logger.error(f"自动标签任务失败: note_id={note.id}, error={e}")
@@ -867,14 +786,15 @@ class NoteService:
           model_traces.user_id 为空、按用户聚合的费用看不到这次调用
         - 提示词要求"分类类别全部设置为未分类"，故**只取 tags、忽略 category**
         """
+        role_model = model_for('auto_tag', self.chat_model)
         from app.core.model_trace import (
             clear_trace_context, new_request_id, set_trace_context,
         )
         from app.utils.prompt_loader import format_prompt
 
-        if os.getenv("AUTO_TAG_ENABLED", "true").strip().lower() != "true":
+        if current_snapshot() is None and os.getenv("AUTO_TAG_ENABLED", "true").strip().lower() != "true":
             return []
-        if self.chat_model is None:
+        if role_model is None:
             return []
         if note.tags:  # 用户已设置标签 → 不覆盖
             return []
@@ -897,13 +817,15 @@ class NoteService:
         set_trace_context(new_request_id(), user_id=note.user_id, stage="auto_tag")
         try:
             async with asyncio.timeout(30):
-                response = await self.chat_model.ainvoke([
+                response = await role_model.ainvoke([
                     ("system", "你是笔记标签助手，只输出 JSON，不要任何解释。"),
                     ("user", prompt),
                 ])
             raw = response.content if isinstance(response.content, str) else ""
         except Exception as e:
             logger.warning(f"自动标签调用失败: note_id={note.id}, {type(e).__name__}: {e}")
+            from app.model_config.runtime import require_failure_policy
+            require_failure_policy('auto_tag','disabled')
             return []
         finally:
             clear_trace_context()
@@ -982,12 +904,13 @@ class NoteService:
             {"completion": str, "model": str, "latency_ms": int}
             任何失败（未配置模型 / 模板缺失 / 调用异常）均返回空补全，不抛异常
         """
+        role_model = model_for('autocomplete', self.autocomplete_model)
         from app.core.model_trace import set_trace_stage
         from app.utils.prompt_loader import format_prompt
 
         empty = {"completion": "", "model": "", "latency_ms": 0}
 
-        if not self.autocomplete_model:
+        if not role_model:
             return empty
 
         # 1. 截取上下文（N2：分别截取光标前后，供 FIM prompt 使用）
@@ -1015,7 +938,7 @@ class NoteService:
         set_trace_stage("autocomplete")
         start = time.monotonic()
         try:
-            response = await self.autocomplete_model.ainvoke([
+            response = await role_model.ainvoke([
                 ("system", "你是一个笔记续写助手，直接输出续写内容。"),
                 ("user", prompt),
             ])
@@ -1027,12 +950,14 @@ class NoteService:
             )
         except Exception as e:
             logger.warning(f"AI 补全调用失败: {e}")
+            from app.model_config.runtime import require_failure_policy
+            require_failure_policy('autocomplete','disabled')
             return empty
 
         # 4. 后处理（F9：字符上限可配，默认 200）
         max_len = int(os.getenv("AUTOCOMPLETE_MAX_COMPLETION", "200"))
         completion = self._postprocess_completion(raw_text, max_len=max_len)
-        model_name = getattr(self.autocomplete_model, "model_name", "") or ""
+        model_name = getattr(role_model, "model_name", "") or ""
 
         return {"completion": completion, "model": model_name, "latency_ms": latency_ms}
 
@@ -1106,12 +1031,13 @@ class NoteService:
             {"result": str, "model": str, "latency_ms": int}
             未配置模型 / 内容过短 / 调用失败均返回空 result，不抛异常
         """
+        role_model = model_for('write_assistant', self.chat_model)
         from app.core.model_trace import set_trace_stage
         from app.utils.prompt_loader import format_prompt
 
         empty = {"result": "", "model": "", "latency_ms": 0}
 
-        if self.chat_model is None:
+        if role_model is None:
             return empty
 
         text = (content or "").strip()
@@ -1136,7 +1062,7 @@ class NoteService:
         start = time.monotonic()
         try:
             async with asyncio.timeout(float(os.getenv("WRITE_ASSIST_TIMEOUT", "60"))):
-                response = await self.chat_model.ainvoke([
+                response = await role_model.ainvoke([
                     ("system", "你是笔记写作助手，只输出结果正文，不要任何解释。"),
                     ("user", prompt),
                 ])
@@ -1144,11 +1070,13 @@ class NoteService:
             raw = response.content if isinstance(response.content, str) else ""
         except Exception as e:
             logger.warning(f"写作辅助调用失败: {type(e).__name__}: {e}")
+            from app.model_config.runtime import require_failure_policy
+            require_failure_policy('write_assistant','disabled')
             return empty
 
         max_len = int(os.getenv("WRITE_ASSIST_MAX_COMPLETION", "1200"))
         result = self._postprocess_write_result(raw, max_len=max_len)
-        model_name = getattr(self.chat_model, "model_name", "") or ""
+        model_name = getattr(role_model, "model_name", "") or ""
 
         return {"result": result, "model": model_name, "latency_ms": latency_ms}
 

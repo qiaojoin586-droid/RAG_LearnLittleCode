@@ -18,7 +18,7 @@
 
 from typing import Optional
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, Query, Response
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.failed_response import BusinessError, ErrorCode
@@ -27,6 +27,7 @@ from app.core.rate_limit import rate_limit
 from app.core.model_trace import clear_trace_context, new_request_id, set_trace_context
 from app.db.database import get_db
 from app.db.redis_client import get_redis
+from app.rag.source_access import note_source
 from app.schemas.note import (
     NoteCreate, NoteUpdate, NoteResponse, NoteListResponse,
     NoteSearchRequest, NoteSearchResponse, BatchOperation,
@@ -34,6 +35,7 @@ from app.schemas.note import (
     DeletedNoteListResponse, DeletedNoteResponse,
 )
 from app.utils.auth_utils import get_current_user_id
+from app.utils.time_utils import utc_now
 router = APIRouter()
 
 
@@ -96,10 +98,8 @@ async def list_recycle_bin(
     db: AsyncSession = Depends(get_db),
 ):
     """分页获取回收站中的已删除笔记（按删除时间倒序，附带剩余清理天数）"""
-    from datetime import datetime as dt
-
     notes, total = await _get_note_service().list_deleted_notes(db, user_id, page, page_size)
-    now = dt.now()
+    now = utc_now()
 
     items = []
     for n in notes:
@@ -125,6 +125,19 @@ async def get_note(
     return success_response(data=NoteResponse.model_validate(note).model_dump())
 
 
+@router.get("/note/{note_id}/index-source", summary="读取已授权的笔记索引版本")
+async def get_note_index_source(
+    note_id: str, response: Response,
+    version: str = Query(pattern=r'^[0-9a-f]{64}$'),
+    user_id: str = Depends(get_current_user_id), db: AsyncSession = Depends(get_db),
+    ordinal: int | None = None,
+):
+    response.headers['Cache-Control'] = 'private, no-store'
+    note, locator = await note_source(db, user_id, note_id, version, ordinal)
+    content = (note.content or note.title)[locator['char_start']:locator['char_end']]
+    return success_response(data={'source_locator': locator, 'content': content})
+
+
 @router.put("/note/{note_id}", summary="更新笔记")
 async def update_note(
     note_id: str,
@@ -132,7 +145,7 @@ async def update_note(
     user_id: str = Depends(get_current_user_id),
     db: AsyncSession = Depends(get_db),
 ):
-    """更新笔记内容，同步更新向量"""
+    """更新笔记内容并提交索引任务。"""
     note = await _get_note_service().update_note(db, note_id, user_id, data)
     # 显式 commit（写操作统一约定，见 move_note_to_category 注释）
     await db.commit()
@@ -176,7 +189,7 @@ async def restore_note(
     user_id: str = Depends(get_current_user_id),
     db: AsyncSession = Depends(get_db),
 ):
-    """从回收站恢复笔记（清除 deleted_at + 重建 ChromaDB 向量）"""
+    """从回收站恢复笔记并提交索引重建任务。"""
     await _get_note_service().restore_note(db, note_id, user_id)
     # 显式 commit：前端恢复成功后立即重拉回收站列表，
     # 避免 auto-commit 落库晚于刷新请求（条目"恢复后仍在"的竞态）
@@ -257,25 +270,24 @@ async def batch_operation(
 
     for note_id in data.note_ids:
         try:
-            if data.operation == 'delete':
-                await note_service.delete_note(db, note_id, user_id)
-            elif data.operation == 'pin':
-                await note_service.pin_note(db, note_id, user_id)
-            elif data.operation == 'unpin':
-                await note_service.unpin_note(db, note_id, user_id)
-            elif data.operation == 'move':
-                if data.target_category_id:
-                    # 新逻辑：按 category_id 移动，同步写入 category 字符串
-                    await note_service.move_note_by_id(db, note_id, user_id, data.target_category_id)
+            async with db.begin_nested():
+                if data.operation == 'delete':
+                    await note_service.delete_note(db, note_id, user_id)
+                elif data.operation == 'pin':
+                    await note_service.pin_note(db, note_id, user_id)
+                elif data.operation == 'unpin':
+                    await note_service.unpin_note(db, note_id, user_id)
+                elif data.operation == 'move':
+                    if data.target_category_id:
+                        await note_service.move_note_by_id(db, note_id, user_id, data.target_category_id)
+                    else:
+                        await note_service.move_note(db, note_id, user_id, data.target_category)
+                elif data.operation == 'permanent_delete':
+                    await note_service.permanent_delete(db, note_id, user_id)
+                elif data.operation == 'restore':
+                    await note_service.restore_note(db, note_id, user_id)
                 else:
-                    # 旧逻辑：按字符串移动（向后兼容）
-                    await note_service.move_note(db, note_id, user_id, data.target_category)
-            elif data.operation == 'permanent_delete':
-                await note_service.permanent_delete(db, note_id, user_id)
-            elif data.operation == 'restore':
-                await note_service.restore_note(db, note_id, user_id)
-            else:
-                raise ValueError(f"未知的操作类型: {data.operation}")
+                    raise ValueError(f"未知的操作类型: {data.operation}")
             success_ids.append(note_id)
         except Exception as e:
             errors.append({"note_id": note_id, "error": str(e)})
