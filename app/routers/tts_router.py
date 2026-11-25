@@ -98,6 +98,13 @@ def cleanup_user_tts_files(user_id: str) -> int:
     )
 
     removed = 0
+    for path in user_dir.glob('*.mp3.part'):
+        try:
+            if path.stat().st_mtime < deadline:
+                path.unlink(missing_ok=True)
+                removed += 1
+        except OSError:
+            logger.warning('TTS 临时文件清理失败')
     # ① TTL 过期 → 删除
     alive = []
     for p in mp3_files:

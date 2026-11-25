@@ -11,13 +11,15 @@
 import { useEffect, useRef, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
-import { User, Settings, Info, LogOut, Coins } from 'lucide-react';
+import { User, Settings, Info, LogOut, Coins, Cpu, FileText } from 'lucide-react';
 import { useUserStore } from '../../stores/useUserStore';
 import { authApi } from '../../api/auth';
 
 const menuItems = [
   { to: '/profile', icon: User, labelKey: 'nav.profile' },
   { to: '/usage', icon: Coins, labelKey: 'nav.usage' },
+  { to: '/memory', icon: FileText, labelKey: 'nav.memory' },
+  { to: '/model-config', icon: Cpu, labelKey: 'nav.model_config' },
   { to: '/settings', icon: Settings, labelKey: 'nav.settings' },
   { to: '/about', icon: Info, labelKey: 'nav.about' },
 ];

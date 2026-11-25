@@ -175,7 +175,7 @@ class DatabaseSessionManager:
     async def add_message(
         self, db: AsyncSession, session_id: str, user_id: str,
         role: str, content: str, idempotency_key: Optional[str] = None,
-        attachments_json: Optional[list] = None
+        attachments_json: Optional[list] = None, *, cache_immediately: bool = True,
     ) -> ChatMessage:
         """
         添加消息到会话
@@ -230,7 +230,8 @@ class DatabaseSessionManager:
         )
         
         # 异步更新 Redis 热缓存
-        await self._push_to_redis_cache(session_id, message)
+        if cache_immediately:
+            await self.cache_message(session_id, message)
         
         return message
     
@@ -275,6 +276,7 @@ class DatabaseSessionManager:
                             role=msg_data.get("role", ""),
                             content=msg_data.get("content", ""),
                             attachments_json=msg_data.get("attachments_json"),
+                            citations_json=dict.fromkeys(msg_data.get("citation_ids", [])),
                         )
                         if msg_data.get("created_at"):
                             msg.created_at = parse_db_time(msg_data["created_at"])
@@ -350,6 +352,7 @@ class DatabaseSessionManager:
                     "content": m.content,
                     "created_at": to_utc_iso(m.created_at),
                     "attachments_json": m.attachments_json,
+                    "citation_ids": m.citation_ids,
                 }
                 for m in reversed(messages)
             ]
@@ -359,7 +362,7 @@ class DatabaseSessionManager:
             
             return msg_list
     
-    async def _push_to_redis_cache(self, session_id: str, message: ChatMessage) -> None:
+    async def cache_message(self, session_id: str, message: ChatMessage) -> None:
         """
         将新消息推入 Redis 热缓存（LPUSH + LTRIM）
         
@@ -377,6 +380,7 @@ class DatabaseSessionManager:
                 "content": message.content,
                 "created_at": to_utc_iso(message.created_at),
                 "attachments_json": message.attachments_json,
+                "citation_ids": message.citation_ids,
             }, ensure_ascii=False)
             
             # LPUSH 添加到列表头部（最新在前）
@@ -402,8 +406,9 @@ class DatabaseSessionManager:
             # 清空旧缓存
             await redis.delete(cache_key)
             
-            # 写入新缓存（反转顺序，最新在前）
-            for msg in reversed(messages):
+            # 输入按时间正序排列；逐条 LPUSH 后最新消息自然位于表头。
+            # 先取最近窗口，避免回填时把较新的消息裁掉。
+            for msg in messages[-self.chat_buffer_size:]:
                 await redis.lpush(cache_key, json.dumps(msg, ensure_ascii=False))
             
             await redis.ltrim(cache_key, 0, self.chat_buffer_size - 1)
@@ -493,7 +498,7 @@ class DatabaseSessionManager:
         return existing
     
     async def get_all_messages(
-        self, db: AsyncSession, session_id: str
+        self, db: AsyncSession, session_id: str, *, before_message_id: int | None = None,
     ) -> List[ChatMessage]:
         """
         获取会话的全部消息（按时间正序）
@@ -507,10 +512,9 @@ class DatabaseSessionManager:
         Returns:
             消息列表（时间升序）
         """
-        result = await db.execute(
-            select(ChatMessage)
-            .where(ChatMessage.session_id == session_id)
-            .order_by(ChatMessage.created_at.asc())
-        )
+        query = select(ChatMessage).where(ChatMessage.session_id == session_id)
+        if before_message_id is not None:
+            query = query.where(ChatMessage.id < before_message_id)
+        result = await db.execute(query.order_by(ChatMessage.created_at.asc(), ChatMessage.id.asc()))
         return list(result.scalars().all())
 

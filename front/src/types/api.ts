@@ -104,6 +104,7 @@ export interface Note {
   /** 分类 ID（双写期间与 category 并行返回） */
   category_id: string | null;
   is_pinned: boolean;
+  is_indexed?: boolean;
   /** 文档类型：md = Markdown / txt = 纯文本（旧数据兼容默认 'md'） */
   format: string;
   created_at: string;
@@ -134,6 +135,7 @@ export interface NoteCreate {
   /** 分类 ID（优先；后端自动同步 category 字符串） */
   category_id?: string;
   is_pinned?: boolean;
+  is_indexed?: boolean;
   /** 文档类型：md = Markdown（默认）/ txt = 纯文本；仅新建时写入 */
   format?: 'md' | 'txt';
 }
@@ -147,6 +149,7 @@ export interface NoteUpdate {
   /** 分类 ID（显式传 null 表示移为未分类） */
   category_id?: string | null;
   is_pinned?: boolean;
+  is_indexed?: boolean;
 }
 
 /** 笔记列表响应 */
@@ -249,6 +252,18 @@ export interface ChatMessage {
   created_at: string;
   /** 附件元数据（用户消息携带） */
   attachments?: AttachmentMeta[];
+  citation_ids?: string[];
+}
+
+export interface CitationSource {
+  title: string;
+  content: string;
+  source_locator: {
+    page_number?: number | null;
+    section_title?: string;
+    char_start: number;
+    char_end: number;
+  };
 }
 
 /** 聊天会话 */
@@ -306,6 +321,23 @@ export interface KnowledgeDocumentListResponse {
   total: number;
 }
 
+export interface KnowledgeUploadJob {
+  job_id: string;
+  filename: string;
+  document_id: number;
+  status: 'queued' | 'running' | 'succeeded' | 'failed' | 'cancelled';
+  stage: string;
+  progress: number;
+  error_code: string | null;
+  attempts?: number;
+  message?: string | null;
+}
+
+export interface KnowledgeUploadJobList {
+  jobs: KnowledgeUploadJob[];
+  next_cursor: string | null;
+}
+
 // ========== 回顾 ==========
 
 /** 回顾记录 */
@@ -346,27 +378,45 @@ export interface ReviewQuestionsResponse {
 
 /** 按阶段聚合的调用统计（不含费用，费用按模型算） */
 export interface UsageStageStat {
-  stage: string;
+  stage: string | null;
   calls: number;
   prompt_tokens: number;
   completion_tokens: number;
 }
 
-/** 按模型聚合的调用与费用 */
-export interface UsageModelStat {
-  model: string;
+export interface UsageCurrencyTotal {
+  currency: string | null;
+  priced_amount: string | null;
+  legacy_estimated_amount: string | null;
+  unknown_usage_count: number;
+  unknown_price_count: number;
+  legacy_estimate_count: number;
+}
+
+interface UsageCosts {
+  currency_totals?: UsageCurrencyTotal[];
+  cost_status?: 'complete' | 'partial' | 'unknown';
+  unknown_cost_count?: number;
+  unknown_usage_count?: number;
+}
+
+export interface UsageModelStat extends UsageCosts {
+  model: string | null;
+  provider_origin?: string | null;
   calls: number;
-  cost_cny: number;
+  cost_cny: number | null;
 }
 
 /** 模型调用用量与费用汇总（GET /usage/summary） */
-export interface UsageSummary {
+export interface UsageSummary extends UsageCosts {
+  config_test_usage?: UsageCosts & { calls: number; known_prompt_tokens: number; known_completion_tokens: number;
+    cost_amount: string | null };
   days: number;
   total_calls: number;
   total_prompt_tokens: number;
   total_completion_tokens: number;
   total_tokens: number;
-  total_cost_cny: number;
+  total_cost_cny: number | null;
   avg_latency_ms: number;
   by_stage: UsageStageStat[];
   by_model: UsageModelStat[];

@@ -125,6 +125,11 @@ class ChatMessage(Base):
     # 附件元数据（JSON 数组：file_id/file_type/original_name/width/height 等）
     # 冗余存储用于消息列表/SSE 回显，权威数据在 chat_attachments 表
     attachments_json: Mapped[list | None] = mapped_column(JSON, nullable=True)
+    citations_json: Mapped[dict | None] = mapped_column(JSON(none_as_null=True), nullable=True)
+
+    @property
+    def citation_ids(self) -> list[str]:
+        return list(self.citations_json or {})
 
     # ========== 关联关系 ==========
     session = relationship("ChatSession", back_populates="messages")

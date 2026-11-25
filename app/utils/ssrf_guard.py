@@ -54,7 +54,9 @@ def is_blocked_ip(ip: str) -> bool:
         addr = ipaddress.ip_address(ip)
     except ValueError:
         return True
-    return any(addr in net for net in _BLOCKED_NETWORKS)
+    if isinstance(addr, ipaddress.IPv6Address) and addr.ipv4_mapped:
+        return is_blocked_ip(str(addr.ipv4_mapped))
+    return not addr.is_global or any(addr in net for net in _BLOCKED_NETWORKS)
 
 
 def validate_public_url(url: str) -> None:
@@ -77,6 +79,12 @@ def validate_public_url(url: str) -> None:
     host = parsed.hostname
     if not host:
         raise ValueError(f"URL 缺少主机名: {url[:200]}")
+    if parsed.username is not None or parsed.password is not None:
+        raise ValueError("URL 不允许包含用户凭据")
+    try:
+        parsed.port
+    except ValueError as exc:
+        raise ValueError("URL 端口无效") from exc
 
     # 主机名本身是字面 IP → 直接校验（支持 IPv6 字面量）
     try:
@@ -116,3 +124,28 @@ def extract_url_arg(args: tuple, kwargs: dict) -> Optional[str]:
     if args and isinstance(args[0], dict):
         return args[0].get("url")
     return kwargs.get("url")
+
+
+def extract_url_args(args: tuple, kwargs: dict, fields: set[str]) -> list[str]:
+    """Collect declared URL fields in positional/dict/nested/list tool input."""
+    values: list[str] = []
+
+    def visit(value):
+        if isinstance(value, dict):
+            for key, item in value.items():
+                if key in fields and item is not None:
+                    items = item if isinstance(item, list) else [item]
+                    if any(not isinstance(url, str) or not url.strip() for url in items):
+                        raise ValueError("URL 参数必须是非空字符串或字符串数组")
+                    values.extend(items)
+                else:
+                    visit(item)
+        elif isinstance(value, (list, tuple)):
+            for item in value:
+                visit(item)
+
+    visit(kwargs)
+    visit(args)
+    if args and isinstance(args[0], str) and not values:
+        values.append(args[0])
+    return list(dict.fromkeys(values))

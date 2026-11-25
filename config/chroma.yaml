@@ -23,5 +23,6 @@ chroma:
   
   # 重排序模型
   reranker:
+    enabled: false  # M3-14 本地采用门槛由四组冻结评测核验
     model_name: "BAAI/bge-reranker-v2-m3"
     top_k: 3

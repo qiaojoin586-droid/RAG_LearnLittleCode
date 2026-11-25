@@ -8,7 +8,8 @@
 
 from datetime import datetime
 
-from sqlalchemy import String, Text, DateTime, Integer, ForeignKey, func
+from sqlalchemy import JSON, Boolean, Column, String, DateTime, Integer, ForeignKey, Index, Table, Text, func, true
+from sqlalchemy.dialects.mysql import LONGTEXT
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.models.base import Base
@@ -25,6 +26,7 @@ class KnowledgeDocument(Base):
     - 多对一 → User（所属用户）
     """
     __tablename__ = "knowledge_documents"
+    __table_args__ = {'sqlite_autoincrement': True}
     
     # 主键：自增 ID
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
@@ -51,6 +53,8 @@ class KnowledgeDocument(Base):
     
     # 切片数量（文档被切分为多少个向量片段）
     chunk_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    ready_for_retrieval: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=true())
+    source_manifest: Mapped[dict | None] = mapped_column(JSON(none_as_null=True), nullable=True, deferred=True)
     
     # 创建时间
     created_at: Mapped[datetime] = mapped_column(
@@ -67,3 +71,16 @@ class KnowledgeDocument(Base):
     
     def __repr__(self) -> str:
         return f"<KnowledgeDocument(id={self.id}, filename={self.filename})>"
+
+
+# Rebuildable MySQL keyword projection of the published source manifest.
+knowledge_search_chunks = Table(
+    'knowledge_search_chunks', Base.metadata,
+    Column('document_id', Integer, ForeignKey('knowledge_documents.id', ondelete='CASCADE'), primary_key=True),
+    Column('ordinal', Integer, primary_key=True),
+    Column('resource_version_id', String(64), nullable=False),
+    Column('content', Text().with_variant(LONGTEXT(), 'mysql'), nullable=False),
+    Index('ft_knowledge_search_content', 'content', mysql_prefix='FULLTEXT',
+          mysql_with_parser='ngram').ddl_if(dialect='mysql'),
+    mysql_engine='InnoDB', mysql_charset='utf8mb4',
+)

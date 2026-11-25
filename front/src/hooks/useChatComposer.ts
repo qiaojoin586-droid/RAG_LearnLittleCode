@@ -12,7 +12,7 @@
  * 浮层是唯一消费方（AIChat 页已废弃），无需独立消息字段。
  */
 
-import { useState, useRef, useCallback } from 'react';
+import { useState, useRef, useCallback, useEffect } from 'react';
 import { useTranslation } from 'react-i18next';
 import { toast } from 'sonner';
 import { useSSE } from './useSSE';
@@ -45,8 +45,12 @@ export function useChatComposer() {
   const [thinkingText, setThinkingText] = useState('');
   // 深度思考开关（默认关闭；开启后请求带 enable_thinking=true，后端切换思考模型）
   const [enableThinking, setEnableThinking] = useState(false);
+  const [continueOnDisconnect, setContinueOnDisconnect] = useState(false);
   const [loadingMessages, setLoadingMessages] = useState(false);
   const [sessionsLoading, setSessionsLoading] = useState(false);
+  const messageLoadRequestRef = useRef(0);
+
+  useEffect(() => () => { ++messageLoadRequestRef.current; }, []);
 
   // 引用笔记状态
   const [selectedNotes, setSelectedNotes] = useState<Note[]>([]);
@@ -351,6 +355,8 @@ export function useChatComposer() {
           session_id: sessionId ?? undefined,
           message: messageText,
           enable_thinking: enableThinking,
+          continue_on_disconnect: continueOnDisconnect,
+          allow_background_actions: continueOnDisconnect,
           attachment_ids: attachmentIds,
         },
         {
@@ -359,13 +365,17 @@ export function useChatComposer() {
             // 深度思考模式：实时更新思考内容供气泡展示（stage=thinking 为 reasoning_content）
             if (stage === 'thinking') setThinkingText(content);
           },
-          onResponse: (content) => {
-            accumulated += content;
+          onResponse: (content, _sessionId, replace) => {
+            accumulated = replace ? content : accumulated + content;
             pendingContentRef.current = accumulated;
             scheduleFlush();
             // 回答开始流出，反思状态使命结束
             setPlanReflectStage('');
             setPlanReflectRound(0);
+          },
+          onCitations: (session, id, ids) => {
+            setMessages((messages) => messages.map((message) => message.id === aiMsg.id && message.role === 'assistant'
+              ? { ...message, id, session_id: session, citation_ids: ids } : message));
           },
           onDone: (newSessionId) => {
             flushPending();
@@ -447,6 +457,7 @@ export function useChatComposer() {
             setMessages((prev) => {
               if (prev.length === 0) return prev;
               const last = prev[prev.length - 1];
+              if (last.attachments?.some((attachment) => attachment.file_id === info.file_id)) return prev;
               const isTts = info.name === 'text_to_speech';
               const fileMeta: AttachmentMeta = {
                 file_id: info.file_id,
@@ -479,8 +490,11 @@ export function useChatComposer() {
 
   /** 新建对话：停止流式并清空当前会话状态 */
   const handleNewChat = () => {
+    ++messageLoadRequestRef.current;
     stop();
     clearCurrentSession();
+    setContinueOnDisconnect(false);
+    setLoadingMessages(false);
     setInput('');
     setIsStreaming(false);
     setThinkingText('');
@@ -499,14 +513,21 @@ export function useChatComposer() {
   /** 加载指定会话的历史消息（切换会话；流式中切换先停止） */
   const loadSession = useCallback(
     async (id: string) => {
+      const requestId = ++messageLoadRequestRef.current;
+      const isCurrentLoad = () =>
+        requestId === messageLoadRequestRef.current &&
+        useSessionStore.getState().currentSessionId === id;
       stop();
       setCurrentSession(id);
       setLastSessionId(id);
+      setMessages([]);
       setLoadingMessages(true);
       try {
         const res = await sessionsApi.getMessages(id);
+        if (!isCurrentLoad()) return;
         setMessages(res.data?.data?.messages ?? []);
       } catch (err) {
+        if (!isCurrentLoad()) return;
         // 404 表示会话已被删除，清除残留状态
         const status = (err as { response?: { status?: number } })?.response?.status;
         if (status === 404) {
@@ -518,7 +539,7 @@ export function useChatComposer() {
           toast.error(t('assistant.loadFailed'));
         }
       } finally {
-        setLoadingMessages(false);
+        if (requestId === messageLoadRequestRef.current) setLoadingMessages(false);
       }
     },
     [stop, setCurrentSession, setLastSessionId, setMessages, clearCurrentSession, t]
@@ -549,7 +570,9 @@ export function useChatComposer() {
         const { currentSessionId: cur, lastSessionId: last, clearCurrentSession: clearCur } =
           useSessionStore.getState();
         if (cur === id || last === id) {
+          ++messageLoadRequestRef.current;
           clearCur();
+          setLoadingMessages(false);
         }
         toast.success(t('assistant.deleted'));
       } catch (err) {
@@ -583,6 +606,8 @@ export function useChatComposer() {
     stopStreaming: stop,
     enableThinking,
     setEnableThinking,
+    continueOnDisconnect,
+    setContinueOnDisconnect,
     thinkingText,
     loadingMessages,
     sessionsLoading,

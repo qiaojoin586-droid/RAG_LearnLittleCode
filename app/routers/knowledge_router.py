@@ -1,447 +1,134 @@
-"""
-知识库路由
-
-端点：
-- POST /knowledge/upload - 上传知识库文档（SSE 流式进度推送）
-- GET /knowledge/documents - 文档列表
-- GET /knowledge/documents/{doc_id} - 文档详情
-- DELETE /knowledge/documents/{doc_id} - 删除文档
-
-上传接口使用 SSE（Server-Sent Events）实时推送文档处理进度，
-事件格式：
-- {event_type: "processing", filename, progress, stage}
-- {event_type: "completed", filename, progress, document_id}
-- {event_type: "finish"}
-- {event_type: "error", message}
-"""
+"""Knowledge upload, durable progress, and owner-scoped document access."""
 
 import asyncio
 import json
 import os
-import uuid
-from pathlib import Path
+from uuid import UUID
 
-from fastapi import APIRouter, Depends, UploadFile, File
+from fastapi import APIRouter, Depends, File, Query, Response, UploadFile
 from fastapi.responses import StreamingResponse
-from sqlalchemy import select, func
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.logger_handler import logger
-from app.core.success_response import success_response
 from app.core.failed_response import BusinessError, ErrorCode
 from app.core.rate_limit import rate_limit
-from app.db.database import get_db
+from app.core.success_response import success_response
+from app.db.database import async_session_factory, get_db
+from app.model_config.snapshots import current_snapshot
 from app.models.knowledge import KnowledgeDocument
-from app.schemas.knowledge import KnowledgeDocumentResponse, KnowledgeDocumentListResponse
+from app.rag.ingest import UPLOAD_ROOT, list_upload_jobs, read_upload_job, submit_deletion, submit_upload
+from app.rag.source_access import read_document_source
+from app.schemas.knowledge import KnowledgeDocumentListResponse, KnowledgeDocumentResponse
 from app.utils.auth_utils import get_current_user_id
-from app.utils.file_handler import (
-    validate_upload_file, calculate_md5_bytes, get_safe_filename, ensure_dir,
-    read_upload_limited,
-)
+from app.utils.file_handler import get_safe_filename, read_upload_limited, validate_upload_file
+
 
 router = APIRouter()
 
-# 上传目录
-UPLOAD_DIR = "data/uploads"
+
+def _sse(data):
+    return f'data: {json.dumps(data, ensure_ascii=False)}\n\n'
 
 
-def _make_sse_event(data: dict) -> str:
-    """
-    构造一条 SSE 事件消息
+async def _upload_events(user_id, filename, document_id, job_id):
+    if job_id is None:
+        yield _sse({'event_type': 'completed', 'filename': filename, 'progress': 100,
+                    'document_id': document_id, 'message': '文档已存在，已跳过上传'})
+        yield _sse({'event_type': 'finish'})
+        return
 
-    格式为 "data: {json}\n\n"，前端通过 ReadableStream 逐行解析。
-
-    Args:
-        data: 要推送的事件数据字典
-
-    Returns:
-        SSE 格式字符串
-    """
-    return f"data: {json.dumps(data, ensure_ascii=False)}\n\n"
-
-
-async def _process_document_with_progress(
-    content: bytes,
-    filename: str,
-    file_size: int,
-    file_type: str,
-    md5: str,
-    user_id: str,
-):
-    """
-    文档处理管线（带 SSE 进度推送）
-
-    分四个阶段处理上传的文档，每个阶段通过 yield 推送 SSE 事件：
-    1. 文件保存（0~20%）
-    2. 文档解析（20~50%）
-    3. 文本切片（50~75%）
-    4. 向量化入库（75~100%）
-
-    Args:
-        content: 文件原始字节内容
-        filename: 安全文件名
-        file_size: 文件大小
-        file_type: MIME 类型
-        md5: 文件 MD5
-        user_id: 用户 ID
-
-    Yields:
-        SSE 事件字符串
-    """
-    safe_name = get_safe_filename(filename)
-    file_id = str(uuid.uuid4())[:8]
-    stored_name = f"{file_id}_{safe_name}"
-
-    # ===== 阶段 1: 保存文件（0% → 20%） =====
-    yield _make_sse_event({
-        "event_type": "processing",
-        "filename": safe_name,
-        "progress": 0,
-        "stage": "saving",
-        "message": "正在保存文件...",
-    })
-
-    upload_path = Path(UPLOAD_DIR) / user_id
-    ensure_dir(str(upload_path))
-    file_path = upload_path / stored_name
-
-    with open(file_path, "wb") as f:
-        f.write(content)
-
-    await asyncio.sleep(0.1)  # 让前端能看到进度变化
-
-    yield _make_sse_event({
-        "event_type": "processing",
-        "filename": safe_name,
-        "progress": 20,
-        "stage": "saved",
-        "message": "文件保存完成",
-    })
-
-    # ===== 阶段 2: 文档解析（20% → 50%） =====
-    yield _make_sse_event({
-        "event_type": "processing",
-        "filename": safe_name,
-        "progress": 30,
-        "stage": "parsing",
-        "message": "正在解析文档内容...",
-    })
-
-    # 提取文本内容（支持 TXT / Markdown / PDF）
-    text_content = ""
-    try:
-        if file_type in ("text/plain", "text/markdown") or safe_name.endswith((".txt", ".md")):
-            text_content = content.decode("utf-8", errors="replace")
-        elif safe_name.endswith(".pdf"):
-            # PDF 文本提取（使用 PyMuPDF）
-            try:
-                import fitz  # PyMuPDF
-                doc = fitz.open(stream=content, filetype="pdf")
-                text_parts = []
-                for page in doc:
-                    page_text = page.get_text()
-                    if page_text:
-                        text_parts.append(page_text)
-                doc.close()
-                text_content = "\n\n".join(text_parts)
-                logger.info(f"PDF 解析成功: {len(text_parts)} 页, 提取 {len(text_content)} 字符")
-            except ImportError:
-                logger.warning("PyMuPDF 未安装，PDF 解析降级为纯文本提取")
-                text_content = content.decode("utf-8", errors="replace")
-            except Exception as pdf_err:
-                logger.warning(f"PDF 解析失败: {pdf_err}，降级为纯文本提取")
-                text_content = content.decode("utf-8", errors="replace")
-        else:
-            text_content = content.decode("utf-8", errors="replace")
-    except Exception as e:
-        logger.warning(f"文档解析失败，使用原始内容: {e}")
-        text_content = content.decode("utf-8", errors="replace")
-
-    await asyncio.sleep(0.3)
-
-    yield _make_sse_event({
-        "event_type": "processing",
-        "filename": safe_name,
-        "progress": 50,
-        "stage": "parsed",
-        "message": "文档解析完成",
-    })
-
-    # ===== 阶段 3: 文本切片（50% → 75%） =====
-    yield _make_sse_event({
-        "event_type": "processing",
-        "filename": safe_name,
-        "progress": 60,
-        "stage": "splitting",
-        "message": "正在文本切片...",
-    })
-
-    # 调用 TextSplitter 进行切片（根据文件扩展名选择分割策略）
-    chunks = []
-    chunk_metadatas_section = []
-    if text_content.strip():
-        from app.rag.text_spliter import TextSplitter
-        splitter = TextSplitter()
-        # 根据文件扩展名推导文档类型
-        doc_type = safe_name.rsplit(".", 1)[-1].lower() if "." in safe_name else "txt"
-        chunks, chunk_metadatas_section = await splitter.async_split_with_sections(
-            text_content, doc_type
-        )
-    chunk_count = len(chunks)
-
-    yield _make_sse_event({
-        "event_type": "processing",
-        "filename": safe_name,
-        "progress": 75,
-        "stage": "splitted",
-        "message": f"文本切片完成，共 {chunk_count} 个片段",
-    })
-
-    # ===== 阶段 4: 向量化入库（75% → 100%） =====
-    yield _make_sse_event({
-        "event_type": "processing",
-        "filename": safe_name,
-        "progress": 85,
-        "stage": "vectorizing",
-        "message": "正在向量化...",
-    })
-
-    # 写入数据库（使用独立的 session，因为请求 session 在 SSE 流式响应时已关闭）
-    from app.db.database import async_session_factory
-    async with async_session_factory() as new_db:
-        doc = KnowledgeDocument(
-            user_id=user_id,
-            filename=safe_name,
-            file_path=str(file_path),
-            file_size=file_size,
-            file_type=file_type,
-            md5_hash=md5,
-            chunk_count=chunk_count,
-        )
-        new_db.add(doc)
-        # 只 flush 生成 doc.id（未提交），向量写入成功后才 commit：
-        # 避免出现"DB 已提交但向量失败、文档永远不可检索"的数据不一致（审查 P0-8）
-        await new_db.flush()
-        await new_db.refresh(doc)
-
-        # 调用 VectorStore 写入 ChromaDB（先写向量，失败即回滚 DB 并清理文件）
-        if chunks:
-            try:
-                from app.rag.vector_store import VectorStoreService
-                vector_store = VectorStoreService()
-
-                chunk_ids = [f"{doc.id}_{i}" for i in range(chunk_count)]
-                metadatas = [
-                    {
-                        "user_id": user_id,
-                        "document_id": str(doc.id),
-                        "filename": safe_name,
-                        "chunk_index": i,
-                        # 合并切片器返回的章节元数据
-                        "section_title": (
-                            chunk_metadatas_section[i].get("section_title", "")
-                            if i < len(chunk_metadatas_section) else ""
-                        ),
-                    }
-                    for i in range(chunk_count)
-                ]
-
-                await vector_store.upsert_document(
-                    documents=chunks,
-                    metadatas=metadatas,
-                    ids=chunk_ids,
-                    collection="rag",
-                )
-                logger.info(f"向量写入成功: doc_id={doc.id}, chunks={chunk_count}")
-            except Exception as ve:
-                # 回滚 DB（session 关闭时自动回滚未提交事务）+ 清理已落盘文件
-                try:
-                    Path(file_path).unlink(missing_ok=True)
-                except Exception as fe:
-                    logger.warning(f"清理入库失败的文件失败: {fe}")
-                logger.error(f"向量写入失败，文档已回滚: doc_id={doc.id}, error={ve}")
-                raise RuntimeError("向量化入库失败，文档未保存，请稍后重试") from ve
-
-        # 向量写入成功（或文档无可分片内容），提交 DB
-        await new_db.commit()
-        await new_db.refresh(doc)
-
-    yield _make_sse_event({
-        "event_type": "processing",
-        "filename": safe_name,
-        "progress": 100,
-        "stage": "vectorized",
-        "message": "向量化入库完成",
-    })
-
-    # ===== 完成事件 =====
-    yield _make_sse_event({
-        "event_type": "completed",
-        "filename": safe_name,
-        "progress": 100,
-        "document_id": doc.id,
-        "message": "文档处理完成",
-    })
-
-    logger.info(f"知识库文档处理完成: doc_id={doc.id}, filename={safe_name}, chunks={chunk_count}")
-
-
-@router.post("/knowledge/upload", summary="上传知识库文档（SSE 进度推送）", dependencies=[Depends(rate_limit(endpoint_limit=20))])
-async def upload_document(
-    file: UploadFile = File(...),
-    user_id: str = Depends(get_current_user_id),
-    db: AsyncSession = Depends(get_db),
-):
-    """
-    上传知识库文档（SSE 流式进度推送）
-
-    支持 PDF / Markdown / TXT，单文件上限 50MB。
-    自动 MD5 查重，已存在则跳过。
-    处理过程通过 SSE 实时推送进度事件。
-    """
-    max_size = int(os.getenv("MAX_UPLOAD_SIZE_MB", "50"))
-
-    # 读取文件内容（分块限流，超限立即中断，防内存 DoS）
-    content = await read_upload_limited(file, max_size)
-    file_size = len(content)
-
-    # 校验文件
-    ext = validate_upload_file(file.filename, file_size, max_size)
-
-    # 计算 MD5
-    md5 = calculate_md5_bytes(content)
-
-    # MD5 查重
-    result = await db.execute(
-        select(KnowledgeDocument).where(
-            KnowledgeDocument.md5_hash == md5,
-            KnowledgeDocument.user_id == user_id,
-        )
-    )
-    existing = result.scalar_one_or_none()
-    if existing:
-        # 文档已存在，直接返回完成事件
-        async def skip_generator():
-            yield _make_sse_event({
-                "event_type": "completed",
-                "filename": get_safe_filename(file.filename),
-                "progress": 100,
-                "document_id": existing.id,
-                "message": "文档已存在，已跳过上传",
-            })
-            yield _make_sse_event({"event_type": "finish"})
-
-        return StreamingResponse(
-            skip_generator(),
-            media_type="text/event-stream",
-            headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
-        )
-
-    # 创建 SSE 流式响应
-    async def event_generator():
-        """SSE 事件生成器，包装文档处理管线"""
+    previous = None
+    next_keepalive = asyncio.get_running_loop().time() + 15
+    while True:
         try:
-            async for event in _process_document_with_progress(
-                content=content,
-                filename=file.filename,
-                file_size=file_size,
-                file_type=file.content_type or "application/octet-stream",
-                md5=md5,
-                user_id=user_id,
-            ):
-                yield event
-
-            # 发送结束标记
-            yield _make_sse_event({"event_type": "finish"})
-
-        except Exception as e:
-            logger.error(f"文档处理失败: {type(e).__name__}: {e}", exc_info=True)
-            # 对外统一文案（审查 M15：内部异常细节仅入日志，不直出客户端）
-            yield _make_sse_event({
-                "event_type": "error",
-                "message": "文档处理失败，请稍后重试",
-            })
-
-    return StreamingResponse(
-        event_generator(),
-        media_type="text/event-stream",
-        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
-    )
+            state = await read_upload_job(async_session_factory, user_id, job_id)
+        except BusinessError:
+            yield _sse({'event_type': 'error', 'job_id': job_id, 'message': '上传任务已不可用'})
+            return
+        if state['status'] == 'succeeded':
+            yield _sse({'event_type': 'completed', **state, 'message': '文档处理完成'})
+            yield _sse({'event_type': 'finish'})
+            return
+        if state['status'] in ('failed', 'cancelled'):
+            yield _sse({'event_type': 'error', **state})
+            return
+        if state != previous:
+            yield _sse({'event_type': 'processing', **state})
+            previous = state
+        elif asyncio.get_running_loop().time() >= next_keepalive:
+            yield ': waiting\n\n'
+            next_keepalive = asyncio.get_running_loop().time() + 15
+        await asyncio.sleep(1)
 
 
-@router.get("/knowledge/documents", summary="文档列表")
-async def list_documents(
+@router.post('/knowledge/upload', summary='上传知识库文档', dependencies=[Depends(rate_limit(endpoint_limit=20))])
+async def upload_document(file: UploadFile = File(...), user_id: str = Depends(get_current_user_id)):
+    max_size = int(os.getenv('MAX_UPLOAD_SIZE_MB', '50'))
+    content = await read_upload_limited(file, max_size)
+    extension = validate_upload_file(file.filename or '', len(content), max_size)[1:]
+    filename = get_safe_filename(file.filename)
+    snapshot = current_snapshot()
+    document_id, job_id = await submit_upload(async_session_factory, user_id, filename, extension, content,
+                                              snapshot.release_id if snapshot is not None else None)
+    headers = {'Cache-Control': 'private, no-store', 'X-Accel-Buffering': 'no'}
+    if job_id is not None:
+        headers['X-Knowledge-Job-Id'] = job_id
+    return StreamingResponse(_upload_events(user_id, filename, document_id, job_id),
+                             media_type='text/event-stream', headers=headers)
+
+
+@router.get('/knowledge/upload-jobs', summary='恢复知识库上传进度')
+async def get_upload_jobs(
+    response: Response, after: UUID | None = None, limit: int = Query(20, ge=1, le=100),
     user_id: str = Depends(get_current_user_id),
-    db: AsyncSession = Depends(get_db),
 ):
-    """获取当前用户的知识库文档列表"""
-    result = await db.execute(
-        select(KnowledgeDocument)
-        .where(KnowledgeDocument.user_id == user_id)
-        .order_by(KnowledgeDocument.created_at.desc())
-    )
-    docs = list(result.scalars().all())
-    
+    response.headers['Cache-Control'] = 'private, no-store'
+    return success_response(data=await list_upload_jobs(
+        async_session_factory, user_id, after=str(after) if after is not None else None, limit=limit,
+    ))
+
+
+@router.get('/knowledge/upload-jobs/{job_id}', summary='查询知识库上传任务')
+async def get_upload_job(job_id: UUID, response: Response, user_id: str = Depends(get_current_user_id)):
+    response.headers['Cache-Control'] = 'private, no-store'
+    return success_response(data=await read_upload_job(async_session_factory, user_id, str(job_id)))
+
+
+@router.get('/knowledge/documents', summary='文档列表')
+async def list_documents(user_id: str = Depends(get_current_user_id), db: AsyncSession = Depends(get_db)):
+    result = await db.execute(select(KnowledgeDocument).where(
+        KnowledgeDocument.user_id == user_id, KnowledgeDocument.ready_for_retrieval.is_(True),
+    ).order_by(KnowledgeDocument.created_at.desc()))
+    documents = result.scalars().all()
     return success_response(data=KnowledgeDocumentListResponse(
-        documents=[KnowledgeDocumentResponse.model_validate(d).model_dump() for d in docs],
-        total=len(docs),
+        documents=[KnowledgeDocumentResponse.model_validate(document) for document in documents],
+        total=len(documents),
     ).model_dump())
 
 
-@router.get("/knowledge/documents/{doc_id}", summary="文档详情")
-async def get_document(
-    doc_id: int,
-    user_id: str = Depends(get_current_user_id),
-    db: AsyncSession = Depends(get_db),
-):
-    """获取文档详细信息"""
-    result = await db.execute(
-        select(KnowledgeDocument).where(
-            KnowledgeDocument.id == doc_id,
-            KnowledgeDocument.user_id == user_id,
-        )
-    )
-    doc = result.scalar_one_or_none()
-    
-    if not doc:
-        raise BusinessError(code=ErrorCode.DOCUMENT_NOT_FOUND, http_status=404)
-    
-    return success_response(data=KnowledgeDocumentResponse.model_validate(doc).model_dump())
+@router.get('/knowledge/documents/{doc_id}', summary='文档详情')
+async def get_document(doc_id: int, user_id: str = Depends(get_current_user_id), db: AsyncSession = Depends(get_db)):
+    document = await db.scalar(select(KnowledgeDocument).where(
+        KnowledgeDocument.id == doc_id, KnowledgeDocument.user_id == user_id, KnowledgeDocument.ready_for_retrieval.is_(True),
+    ))
+    if document is None:
+        raise BusinessError(ErrorCode.DOCUMENT_NOT_FOUND, http_status=404)
+    return success_response(data=KnowledgeDocumentResponse.model_validate(document).model_dump())
 
 
-@router.delete("/knowledge/documents/{doc_id}", summary="删除文档")
-async def delete_document(
-    doc_id: int,
-    user_id: str = Depends(get_current_user_id),
-    db: AsyncSession = Depends(get_db),
+@router.get('/knowledge/documents/{doc_id}/chunks/{ordinal}', summary='按原文版本读取知识库切片')
+async def get_document_chunk(
+    doc_id: int, ordinal: int, response: Response,
+    version: str = Query(pattern=r'^[0-9a-f]{64}$'),
+    user_id: str = Depends(get_current_user_id), db: AsyncSession = Depends(get_db),
 ):
-    """删除文档（同时删除 ChromaDB 向量和本地文件）"""
-    result = await db.execute(
-        select(KnowledgeDocument).where(
-            KnowledgeDocument.id == doc_id,
-            KnowledgeDocument.user_id == user_id,
-        )
-    )
-    doc = result.scalar_one_or_none()
-    
-    if not doc:
-        raise BusinessError(code=ErrorCode.DOCUMENT_NOT_FOUND, http_status=404)
-    
-    # 删除本地文件
-    try:
-        Path(doc.file_path).unlink(missing_ok=True)
-    except Exception as e:
-        logger.warning(f"删除文件失败: {e}")
-    
-    # 删除 ChromaDB 向量
-    try:
-        from app.rag.vector_store import VectorStoreService
-        vector_store = VectorStoreService()
-        await vector_store.delete_document_vectors(str(doc.id))
-    except Exception as e:
-        logger.warning(f"删除 ChromaDB 向量失败: {e}")
-    
-    await db.delete(doc)
-    await db.flush()
-    
-    return success_response(message="文档已删除")
+    response.headers['Cache-Control'] = 'private, no-store'
+    source = await read_document_source(db, user_id, doc_id, ordinal, version, UPLOAD_ROOT)
+    return success_response(data={key: source[key] for key in ('source_locator', 'content')})
+
+
+@router.delete('/knowledge/documents/{doc_id}', summary='删除文档')
+async def delete_document(doc_id: int, user_id: str = Depends(get_current_user_id)):
+    snapshot = current_snapshot()
+    await submit_deletion(async_session_factory, user_id, doc_id, snapshot.release_id if snapshot is not None else None)
+    return success_response(message='文档已删除')

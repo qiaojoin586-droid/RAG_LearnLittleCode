@@ -1,0 +1,3480 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:raglearn:model-config:v1.4",
+  "title": "RagLearnCode model configuration and personal memory v1.4",
+  "$ref": "#/$defs/DraftPayload",
+  "$defs": {
+    "DraftTestInput": {
+      "type": "object",
+      "properties": {
+        "role_key": {
+          "$ref": "#/$defs/RoleKeyV3"
+        },
+        "fallback_role_key": {
+          "$ref": "#/$defs/RoleKey"
+        },
+        "expected_draft_version": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "budget": {
+          "enum": [
+            "standard",
+            "local_cold"
+          ]
+        }
+      },
+      "required": [
+        "role_key",
+        "expected_draft_version"
+      ],
+      "additionalProperties": false
+    },
+    "GrantUpdateInput": {
+      "type": "object",
+      "properties": {
+        "config_role_key": {
+          "enum": [
+            "config_reader",
+            "config_operator",
+            "config_admin"
+          ]
+        },
+        "expected_policy_version": {
+          "type": "integer",
+          "minimum": 1
+        }
+      },
+      "required": [
+        "config_role_key",
+        "expected_policy_version"
+      ],
+      "additionalProperties": false
+    },
+    "GrantDeleteInput": {
+      "type": "object",
+      "properties": {
+        "expected_policy_version": {
+          "type": "integer",
+          "minimum": 1
+        }
+      },
+      "required": [
+        "expected_policy_version"
+      ],
+      "additionalProperties": false
+    },
+    "Id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 36,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,35}$"
+    },
+    "RoleKey": {
+      "enum": [
+        "chat",
+        "chat_thinking",
+        "classifier",
+        "planner",
+        "vision",
+        "autocomplete",
+        "ppt_outline",
+        "embedding",
+        "session_title",
+        "auto_tag",
+        "write_assistant",
+        "review_question",
+        "memory_summary",
+        "rag_summarize",
+        "synthesize",
+        "reflection",
+        "memory_extraction"
+      ]
+    },
+    "RoleBinding": {
+      "type": "object",
+      "properties": {
+        "enabled": {
+          "type": "boolean"
+        },
+        "selection": {
+          "enum": [
+            "explicit",
+            "follow_role",
+            "follow_execution"
+          ]
+        },
+        "profile_revision_id": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Id"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "credential_revision_id": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Id"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "prompt_revision_id": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Id"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "source_role": {
+          "enum": [
+            "chat",
+            "chat_thinking",
+            "classifier",
+            "planner",
+            "vision",
+            "autocomplete",
+            "ppt_outline",
+            "embedding",
+            "session_title",
+            "auto_tag",
+            "write_assistant",
+            "review_question",
+            "memory_summary",
+            "rag_summarize",
+            "synthesize",
+            "reflection",
+            "memory_extraction",
+            null
+          ]
+        },
+        "fallback": {
+          "type": "array",
+          "items": {
+            "enum": [
+              "chat",
+              "chat_thinking",
+              "classifier",
+              "planner",
+              "vision",
+              "autocomplete",
+              "ppt_outline",
+              "embedding",
+              "session_title",
+              "auto_tag",
+              "write_assistant",
+              "review_question",
+              "memory_summary",
+              "rag_summarize",
+              "synthesize",
+              "reflection",
+              "memory_extraction"
+            ]
+          },
+          "uniqueItems": true,
+          "maxItems": 17
+        },
+        "failure_mode": {
+          "enum": [
+            "error",
+            "rule_only",
+            "react_fallback",
+            "disabled",
+            "default_title"
+          ]
+        }
+      },
+      "required": [
+        "enabled",
+        "selection",
+        "prompt_revision_id",
+        "fallback",
+        "failure_mode"
+      ],
+      "additionalProperties": false,
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "enabled": {
+                "const": true
+              },
+              "selection": {
+                "const": "explicit"
+              }
+            },
+            "required": [
+              "enabled",
+              "selection"
+            ]
+          },
+          "then": {
+            "required": [
+              "profile_revision_id",
+              "credential_revision_id"
+            ],
+            "properties": {
+              "profile_revision_id": {
+                "$ref": "#/$defs/Id"
+              },
+              "source_role": {
+                "type": "null"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "selection": {
+                "const": "follow_role"
+              }
+            },
+            "required": [
+              "selection"
+            ]
+          },
+          "then": {
+            "required": [
+              "source_role"
+            ],
+            "properties": {
+              "source_role": {
+                "enum": [
+                  "chat",
+                  "chat_thinking",
+                  "classifier",
+                  "planner",
+                  "vision",
+                  "autocomplete",
+                  "ppt_outline",
+                  "embedding",
+                  "session_title",
+                  "auto_tag",
+                  "write_assistant",
+                  "review_question",
+                  "memory_summary",
+                  "rag_summarize",
+                  "synthesize",
+                  "reflection",
+                  "memory_extraction"
+                ]
+              },
+              "profile_revision_id": {
+                "type": "null"
+              },
+              "credential_revision_id": {
+                "type": "null"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "selection": {
+                "const": "follow_execution"
+              }
+            },
+            "required": [
+              "selection"
+            ]
+          },
+          "then": {
+            "properties": {
+              "source_role": {
+                "type": "null"
+              },
+              "profile_revision_id": {
+                "type": "null"
+              },
+              "credential_revision_id": {
+                "type": "null"
+              }
+            }
+          }
+        }
+      ]
+    },
+    "RawRoleBindings": {
+      "type": "object",
+      "properties": {
+        "chat": {
+          "allOf": [
+            {
+              "$ref": "#/$defs/RoleBinding"
+            },
+            {
+              "properties": {
+                "selection": {
+                  "enum": [
+                    "explicit",
+                    "follow_role"
+                  ]
+                }
+              }
+            },
+            {
+              "if": {
+                "properties": {
+                  "enabled": {
+                    "const": true
+                  }
+                }
+              },
+              "then": {
+                "properties": {
+                  "prompt_revision_id": {
+                    "$ref": "#/$defs/Id"
+                  }
+                }
+              }
+            }
+          ]
+        },
+        "chat_thinking": {
+          "allOf": [
+            {
+              "$ref": "#/$defs/RoleBinding"
+            },
+            {
+              "properties": {
+                "selection": {
+                  "enum": [
+                    "explicit",
+                    "follow_role"
+                  ]
+                }
+              }
+            },
+            {
+              "if": {
+                "properties": {
+                  "enabled": {
+                    "const": true
+                  }
+                }
+              },
+              "then": {
+                "properties": {
+                  "prompt_revision_id": {
+                    "$ref": "#/$defs/Id"
+                  }
+                }
+              }
+            }
+          ]
+        },
+        "classifier": {
+          "allOf": [
+            {
+              "$ref": "#/$defs/RoleBinding"
+            },
+            {
+              "properties": {
+                "selection": {
+                  "enum": [
+                    "explicit",
+                    "follow_role"
+                  ]
+                }
+              }
+            },
+            {
+              "if": {
+                "properties": {
+                  "enabled": {
+                    "const": true
+                  }
+                }
+              },
+              "then": {
+                "properties": {
+                  "prompt_revision_id": {
+                    "$ref": "#/$defs/Id"
+                  }
+                }
+              }
+            }
+          ]
+        },
+        "planner": {
+          "allOf": [
+            {
+              "$ref": "#/$defs/RoleBinding"
+            },
+            {
+              "properties": {
+                "selection": {
+                  "enum": [
+                    "explicit",
+                    "follow_role"
+                  ]
+                }
+              }
+            },
+            {
+              "if": {
+                "properties": {
+                  "enabled": {
+                    "const": true
+                  }
+                }
+              },
+              "then": {
+                "properties": {
+                  "prompt_revision_id": {
+                    "$ref": "#/$defs/Id"
+                  }
+                }
+              }
+            }
+          ]
+        },
+        "vision": {
+          "allOf": [
+            {
+              "$ref": "#/$defs/RoleBinding"
+            },
+            {
+              "properties": {
+                "selection": {
+                  "enum": [
+                    "explicit",
+                    "follow_role"
+                  ]
+                }
+              }
+            },
+            {
+              "if": {
+                "properties": {
+                  "enabled": {
+                    "const": true
+                  }
+                }
+              },
+              "then": {
+                "properties": {
+                  "prompt_revision_id": {
+                    "$ref": "#/$defs/Id"
+                  }
+                }
+              }
+            }
+          ]
+        },
+        "autocomplete": {
+          "allOf": [
+            {
+              "$ref": "#/$defs/RoleBinding"
+            },
+            {
+              "properties": {
+                "selection": {
+                  "enum": [
+                    "explicit",
+                    "follow_role"
+                  ]
+                }
+              }
+            },
+            {
+              "if": {
+                "properties": {
+                  "enabled": {
+                    "const": true
+                  }
+                }
+              },
+              "then": {
+                "properties": {
+                  "prompt_revision_id": {
+                    "$ref": "#/$defs/Id"
+                  }
+                }
+              }
+            }
+          ]
+        },
+        "ppt_outline": {
+          "allOf": [
+            {
+              "$ref": "#/$defs/RoleBinding"
+            },
+            {
+              "properties": {
+                "selection": {
+                  "enum": [
+                    "explicit",
+                    "follow_role"
+                  ]
+                }
+              }
+            },
+            {
+              "if": {
+                "properties": {
+                  "enabled": {
+                    "const": true
+                  }
+                }
+              },
+              "then": {
+                "properties": {
+                  "prompt_revision_id": {
+                    "$ref": "#/$defs/Id"
+                  }
+                }
+              }
+            }
+          ]
+        },
+        "embedding": {
+          "allOf": [
+            {
+              "$ref": "#/$defs/RoleBinding"
+            },
+            {
+              "properties": {
+                "selection": {
+                  "enum": [
+                    "explicit",
+                    "follow_role"
+                  ]
+                }
+              }
+            },
+            {
+              "properties": {
+                "prompt_revision_id": {
+                  "type": "null"
+                }
+              }
+            }
+          ]
+        },
+        "session_title": {
+          "allOf": [
+            {
+              "$ref": "#/$defs/RoleBinding"
+            },
+            {
+              "properties": {
+                "selection": {
+                  "enum": [
+                    "explicit",
+                    "follow_role"
+                  ]
+                }
+              }
+            },
+            {
+              "if": {
+                "properties": {
+                  "enabled": {
+                    "const": true
+                  }
+                }
+              },
+              "then": {
+                "properties": {
+                  "prompt_revision_id": {
+                    "$ref": "#/$defs/Id"
+                  }
+                }
+              }
+            }
+          ]
+        },
+        "auto_tag": {
+          "allOf": [
+            {
+              "$ref": "#/$defs/RoleBinding"
+            },
+            {
+              "properties": {
+                "selection": {
+                  "enum": [
+                    "explicit",
+                    "follow_role"
+                  ]
+                }
+              }
+            },
+            {
+              "if": {
+                "properties": {
+                  "enabled": {
+                    "const": true
+                  }
+                }
+              },
+              "then": {
+                "properties": {
+                  "prompt_revision_id": {
+                    "$ref": "#/$defs/Id"
+                  }
+                }
+              }
+            }
+          ]
+        },
+        "write_assistant": {
+          "allOf": [
+            {
+              "$ref": "#/$defs/RoleBinding"
+            },
+            {
+              "properties": {
+                "selection": {
+                  "enum": [
+                    "explicit",
+                    "follow_role"
+                  ]
+                }
+              }
+            },
+            {
+              "if": {
+                "properties": {
+                  "enabled": {
+                    "const": true
+                  }
+                }
+              },
+              "then": {
+                "properties": {
+                  "prompt_revision_id": {
+                    "$ref": "#/$defs/Id"
+                  }
+                }
+              }
+            }
+          ]
+        },
+        "review_question": {
+          "allOf": [
+            {
+              "$ref": "#/$defs/RoleBinding"
+            },
+            {
+              "properties": {
+                "selection": {
+                  "enum": [
+                    "explicit",
+                    "follow_role"
+                  ]
+                }
+              }
+            },
+            {
+              "if": {
+                "properties": {
+                  "enabled": {
+                    "const": true
+                  }
+                }
+              },
+              "then": {
+                "properties": {
+                  "prompt_revision_id": {
+                    "$ref": "#/$defs/Id"
+                  }
+                }
+              }
+            }
+          ]
+        },
+        "memory_summary": {
+          "allOf": [
+            {
+              "$ref": "#/$defs/RoleBinding"
+            },
+            {
+              "properties": {
+                "selection": {
+                  "enum": [
+                    "explicit",
+                    "follow_role"
+                  ]
+                }
+              }
+            },
+            {
+              "if": {
+                "properties": {
+                  "enabled": {
+                    "const": true
+                  }
+                }
+              },
+              "then": {
+                "properties": {
+                  "prompt_revision_id": {
+                    "$ref": "#/$defs/Id"
+                  }
+                }
+              }
+            }
+          ]
+        },
+        "rag_summarize": {
+          "allOf": [
+            {
+              "$ref": "#/$defs/RoleBinding"
+            },
+            {
+              "properties": {
+                "selection": {
+                  "enum": [
+                    "explicit",
+                    "follow_role"
+                  ]
+                }
+              }
+            },
+            {
+              "if": {
+                "properties": {
+                  "enabled": {
+                    "const": true
+                  }
+                }
+              },
+              "then": {
+                "properties": {
+                  "prompt_revision_id": {
+                    "$ref": "#/$defs/Id"
+                  }
+                }
+              }
+            }
+          ]
+        },
+        "synthesize": {
+          "allOf": [
+            {
+              "$ref": "#/$defs/RoleBinding"
+            },
+            {
+              "if": {
+                "properties": {
+                  "enabled": {
+                    "const": true
+                  }
+                }
+              },
+              "then": {
+                "properties": {
+                  "prompt_revision_id": {
+                    "$ref": "#/$defs/Id"
+                  }
+                }
+              }
+            }
+          ]
+        },
+        "reflection": {
+          "allOf": [
+            {
+              "$ref": "#/$defs/RoleBinding"
+            },
+            {
+              "properties": {
+                "selection": {
+                  "enum": [
+                    "explicit",
+                    "follow_role"
+                  ]
+                }
+              }
+            },
+            {
+              "if": {
+                "properties": {
+                  "enabled": {
+                    "const": true
+                  }
+                }
+              },
+              "then": {
+                "properties": {
+                  "prompt_revision_id": {
+                    "$ref": "#/$defs/Id"
+                  }
+                }
+              }
+            }
+          ]
+        },
+        "memory_extraction": {
+          "allOf": [
+            {
+              "$ref": "#/$defs/RoleBinding"
+            },
+            {
+              "properties": {
+                "selection": {
+                  "enum": [
+                    "explicit",
+                    "follow_role"
+                  ]
+                }
+              }
+            },
+            {
+              "if": {
+                "properties": {
+                  "enabled": {
+                    "const": true
+                  }
+                }
+              },
+              "then": {
+                "properties": {
+                  "prompt_revision_id": {
+                    "$ref": "#/$defs/Id"
+                  }
+                }
+              }
+            }
+          ]
+        }
+      },
+      "required": [
+        "chat",
+        "chat_thinking",
+        "classifier",
+        "planner",
+        "vision",
+        "autocomplete",
+        "ppt_outline",
+        "embedding",
+        "session_title",
+        "auto_tag",
+        "write_assistant",
+        "review_question",
+        "memory_summary",
+        "rag_summarize",
+        "synthesize",
+        "reflection",
+        "memory_extraction"
+      ],
+      "additionalProperties": false
+    },
+    "IndexBinding": {
+      "type": "object",
+      "properties": {
+        "index_version_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "query_profile_revision_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "credential_revision_id": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Id"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "index_version_id",
+        "query_profile_revision_id",
+        "credential_revision_id"
+      ],
+      "additionalProperties": false
+    },
+    "IndexBindings": {
+      "type": "object",
+      "propertyNames": {
+        "pattern": "^[a-z][a-z0-9_.:-]{0,127}$"
+      },
+      "additionalProperties": {
+        "$ref": "#/$defs/IndexBinding"
+      }
+    },
+    "ProfileInput": {
+      "type": "object",
+      "properties": {
+        "display_name": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "model_kind": {
+          "enum": [
+            "chat",
+            "embedding"
+          ]
+        },
+        "adapter_type": {
+          "enum": [
+            "openai_compatible",
+            "ollama_native",
+            "dashscope_native"
+          ]
+        },
+        "api_protocol": {
+          "enum": [
+            "chat_completions",
+            "responses",
+            "openai_embeddings",
+            "ollama_chat",
+            "ollama_embed",
+            "dashscope_embed"
+          ]
+        },
+        "vendor": {
+          "enum": [
+            "openai",
+            "dashscope",
+            "ollama",
+            "custom"
+          ]
+        },
+        "base_url": {
+          "type": "string",
+          "format": "uri",
+          "maxLength": 2048
+        },
+        "model": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "model_revision": {
+          "anyOf": [
+            {
+              "type": "string",
+              "maxLength": 255
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "auth_mode": {
+          "enum": [
+            "none",
+            "bearer",
+            "dashscope_key"
+          ]
+        },
+        "endpoint_policy_revision_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "context_window": {
+          "anyOf": [
+            {
+              "type": "integer",
+              "minimum": 1
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "tokenizer_id": {
+          "anyOf": [
+            {
+              "type": "string",
+              "maxLength": 128
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "tokenizer_revision": {
+          "anyOf": [
+            {
+              "type": "string",
+              "maxLength": 128
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "token_counting_policy": {
+          "type": "object"
+        },
+        "max_output_tokens": {
+          "anyOf": [
+            {
+              "type": "integer",
+              "minimum": 1
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "connect_timeout_ms": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "request_timeout_ms": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "embedding_dimension": {
+          "anyOf": [
+            {
+              "type": "integer",
+              "minimum": 1
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "parameters": {
+          "type": "object",
+          "propertyNames": {
+            "not": {
+              "enum": [
+                "api_key",
+                "authorization",
+                "headers",
+                "base_url",
+                "base_address",
+                "http_client",
+                "http_async_client",
+                "max_retries",
+                "use_responses_api"
+              ]
+            }
+          }
+        }
+      },
+      "required": [
+        "display_name",
+        "model_kind",
+        "adapter_type",
+        "api_protocol",
+        "vendor",
+        "base_url",
+        "model",
+        "model_revision",
+        "auth_mode",
+        "endpoint_policy_revision_id",
+        "context_window",
+        "tokenizer_id",
+        "tokenizer_revision",
+        "token_counting_policy",
+        "max_output_tokens",
+        "connect_timeout_ms",
+        "request_timeout_ms",
+        "embedding_dimension",
+        "parameters"
+      ],
+      "additionalProperties": false
+    },
+    "PromptInput": {
+      "type": "object",
+      "properties": {
+        "system_text": {
+          "type": "string",
+          "maxLength": 100000
+        },
+        "template_text": {
+          "type": "string",
+          "maxLength": 100000
+        }
+      },
+      "required": [
+        "system_text",
+        "template_text"
+      ],
+      "additionalProperties": false
+    },
+    "CredentialAction": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "action": {
+              "const": "keep"
+            }
+          },
+          "required": [
+            "action"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "action": {
+              "const": "clear"
+            }
+          },
+          "required": [
+            "action"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "action": {
+              "const": "replace"
+            },
+            "api_key": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 16384,
+              "writeOnly": true
+            }
+          },
+          "required": [
+            "action",
+            "api_key"
+          ],
+          "additionalProperties": false
+        }
+      ]
+    },
+    "PatchOperation": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "op": {
+              "const": "replace_profile"
+            },
+            "role_key": {
+              "enum": [
+                "chat",
+                "chat_thinking",
+                "classifier",
+                "planner",
+                "vision",
+                "autocomplete",
+                "ppt_outline",
+                "embedding",
+                "session_title",
+                "auto_tag",
+                "write_assistant",
+                "review_question",
+                "memory_summary",
+                "rag_summarize",
+                "synthesize",
+                "reflection",
+                "memory_extraction",
+                "rag_query_expand"
+              ]
+            },
+            "profile": {
+              "$ref": "#/$defs/ProfileInput"
+            },
+            "credential": {
+              "$ref": "#/$defs/CredentialAction"
+            },
+            "index_keys": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 128
+              },
+              "uniqueItems": true
+            }
+          },
+          "required": [
+            "op",
+            "role_key",
+            "profile",
+            "credential"
+          ],
+          "additionalProperties": false,
+          "allOf": [
+            {
+              "if": {
+                "properties": {
+                  "role_key": {
+                    "const": "embedding"
+                  }
+                },
+                "required": [
+                  "role_key"
+                ]
+              },
+              "then": {
+                "required": [
+                  "index_keys"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "op": {
+              "const": "replace_prompt"
+            },
+            "role_key": {
+              "enum": [
+                "chat",
+                "chat_thinking",
+                "classifier",
+                "planner",
+                "vision",
+                "autocomplete",
+                "ppt_outline",
+                "session_title",
+                "auto_tag",
+                "write_assistant",
+                "review_question",
+                "memory_summary",
+                "rag_summarize",
+                "synthesize",
+                "reflection",
+                "memory_extraction",
+                "rag_query_expand"
+              ]
+            },
+            "prompt": {
+              "$ref": "#/$defs/PromptInput"
+            }
+          },
+          "required": [
+            "op",
+            "role_key",
+            "prompt"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "op": {
+              "const": "replace_binding"
+            },
+            "role_key": {
+              "enum": [
+                "chat",
+                "chat_thinking",
+                "classifier",
+                "planner",
+                "vision",
+                "autocomplete",
+                "ppt_outline",
+                "embedding",
+                "session_title",
+                "auto_tag",
+                "write_assistant",
+                "review_question",
+                "memory_summary",
+                "rag_summarize",
+                "synthesize",
+                "reflection",
+                "memory_extraction",
+                "rag_query_expand"
+              ]
+            },
+            "binding": {
+              "$ref": "#/$defs/RoleBinding"
+            }
+          },
+          "required": [
+            "op",
+            "role_key",
+            "binding"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "op": {
+              "const": "replace_index_binding"
+            },
+            "index_key": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128
+            },
+            "binding": {
+              "$ref": "#/$defs/IndexBinding"
+            }
+          },
+          "required": [
+            "op",
+            "index_key",
+            "binding"
+          ],
+          "additionalProperties": false
+        }
+      ]
+    },
+    "DraftPayload": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/DraftPayloadV2"
+        },
+        {
+          "$ref": "#/$defs/DraftPayloadV3"
+        }
+      ]
+    },
+    "DraftCreate": {
+      "type": "object",
+      "properties": {
+        "base_release_id": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Id"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "expected_head_version": {
+          "type": "integer",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "base_release_id",
+        "expected_head_version"
+      ],
+      "additionalProperties": false
+    },
+    "DraftPatch": {
+      "type": "object",
+      "properties": {
+        "operations": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 64,
+          "items": {
+            "$ref": "#/$defs/PatchOperation"
+          }
+        }
+      },
+      "required": [
+        "operations"
+      ],
+      "additionalProperties": false
+    },
+    "RebaseInput": {
+      "type": "object",
+      "properties": {
+        "expected_head_version": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "resolutions": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {
+            "type": "object",
+            "properties": {
+              "path": {
+                "type": "string",
+                "pattern": "^/(role_bindings_raw|index_bindings)/[a-z][a-z0-9_.:-]*$"
+              },
+              "choice": {
+                "enum": [
+                  "ours",
+                  "theirs"
+                ]
+              }
+            },
+            "required": [
+              "path",
+              "choice"
+            ],
+            "additionalProperties": false
+          }
+        }
+      },
+      "required": [
+        "expected_head_version"
+      ],
+      "additionalProperties": false
+    },
+    "PublishInput": {
+      "type": "object",
+      "properties": {
+        "expected_draft_version": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "expected_head_version": {
+          "type": "integer",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "expected_draft_version",
+        "expected_head_version"
+      ],
+      "additionalProperties": false
+    },
+    "RestoreInput": {
+      "type": "object",
+      "properties": {
+        "expected_head_version": {
+          "type": "integer",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "expected_head_version"
+      ],
+      "additionalProperties": false
+    },
+    "StaticBinding": {
+      "type": "object",
+      "properties": {
+        "enabled": {
+          "type": "boolean"
+        },
+        "profile_revision_id": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Id"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "credential_revision_id": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Id"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "credential_version": {
+          "anyOf": [
+            {
+              "type": "integer",
+              "minimum": 1
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "prompt_revision_id": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Id"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "fallback": {
+          "type": "array",
+          "items": {
+            "enum": [
+              "chat",
+              "chat_thinking",
+              "classifier",
+              "planner",
+              "vision",
+              "autocomplete",
+              "ppt_outline",
+              "embedding",
+              "session_title",
+              "auto_tag",
+              "write_assistant",
+              "review_question",
+              "memory_summary",
+              "rag_summarize",
+              "synthesize",
+              "reflection",
+              "memory_extraction"
+            ]
+          },
+          "uniqueItems": true
+        },
+        "failure_mode": {
+          "enum": [
+            "error",
+            "rule_only",
+            "react_fallback",
+            "disabled",
+            "default_title"
+          ]
+        }
+      },
+      "required": [
+        "enabled",
+        "profile_revision_id",
+        "credential_revision_id",
+        "credential_version",
+        "prompt_revision_id",
+        "fallback",
+        "failure_mode"
+      ],
+      "additionalProperties": false
+    },
+    "ReleaseManifest": {
+      "type": "object",
+      "properties": {
+        "schema_version": {
+          "const": 2
+        },
+        "role_bindings_raw": {
+          "$ref": "#/$defs/RawRoleBindings"
+        },
+        "resolved_static_bindings": {
+          "type": "object",
+          "propertyNames": {
+            "enum": [
+              "chat",
+              "chat_thinking",
+              "classifier",
+              "planner",
+              "vision",
+              "autocomplete",
+              "ppt_outline",
+              "embedding",
+              "session_title",
+              "auto_tag",
+              "write_assistant",
+              "review_question",
+              "memory_summary",
+              "rag_summarize",
+              "synthesize",
+              "reflection",
+              "memory_extraction"
+            ]
+          },
+          "additionalProperties": {
+            "$ref": "#/$defs/StaticBinding"
+          }
+        },
+        "follow_execution_roles": {
+          "type": "array",
+          "items": {
+            "const": "synthesize"
+          },
+          "maxItems": 1,
+          "uniqueItems": true
+        },
+        "index_bindings": {
+          "$ref": "#/$defs/IndexBindings"
+        }
+      },
+      "required": [
+        "schema_version",
+        "role_bindings_raw",
+        "resolved_static_bindings",
+        "follow_execution_roles",
+        "index_bindings"
+      ],
+      "additionalProperties": false
+    },
+    "RoleCredentialState": {
+      "type": "object",
+      "properties": {
+        "role_key": {
+          "$ref": "#/$defs/RoleKeyV3"
+        },
+        "has_api_key": {
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "masked_suffix": {
+          "anyOf": [
+            {
+              "type": "string",
+              "maxLength": 8
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "credential_revision_id": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Id"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "credential_version": {
+          "anyOf": [
+            {
+              "type": "integer",
+              "minimum": 1
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "status": {
+          "enum": [
+            "candidate",
+            "active",
+            "retired",
+            "revoked",
+            "not_configured",
+            "dynamic",
+            "disabled"
+          ]
+        },
+        "auth_mode": {
+          "anyOf": [
+            {
+              "enum": [
+                "none",
+                "bearer",
+                "dashscope_key"
+              ]
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "role_key",
+        "has_api_key",
+        "masked_suffix",
+        "credential_revision_id",
+        "credential_version",
+        "status",
+        "auth_mode"
+      ],
+      "additionalProperties": false
+    },
+    "EndpointPolicyInput": {
+      "type": "object",
+      "properties": {
+        "policy_key": {
+          "type": "string",
+          "pattern": "^[a-z][a-z0-9_-]{0,63}$"
+        },
+        "origin": {
+          "type": "string",
+          "format": "uri",
+          "maxLength": 320
+        },
+        "allowed_path_prefix": {
+          "type": "string",
+          "pattern": "^/",
+          "maxLength": 512
+        },
+        "address_mode": {
+          "enum": [
+            "public_https",
+            "trusted_private"
+          ]
+        },
+        "connection_rules": {
+          "type": "object"
+        },
+        "environment": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 32
+        }
+      },
+      "required": [
+        "policy_key",
+        "origin",
+        "allowed_path_prefix",
+        "address_mode",
+        "connection_rules",
+        "environment"
+      ],
+      "additionalProperties": false
+    },
+    "ReauthInput": {
+      "type": "object",
+      "properties": {
+        "password": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 1024,
+          "writeOnly": true
+        }
+      },
+      "required": [
+        "password"
+      ],
+      "additionalProperties": false
+    },
+    "ReauthOutput": {
+      "type": "object",
+      "properties": {
+        "proof": {
+          "type": "string",
+          "minLength": 1
+        },
+        "proof_type": {
+          "const": "config_reauth"
+        },
+        "expires_in": {
+          "const": 600
+        },
+        "expires_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "actor_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "scope_type": {
+          "const": "system"
+        },
+        "scope_id": {
+          "const": "system"
+        }
+      },
+      "required": [
+        "proof",
+        "proof_type",
+        "expires_in",
+        "expires_at",
+        "actor_id",
+        "scope_type",
+        "scope_id"
+      ],
+      "additionalProperties": false
+    },
+    "ErrorEnvelope": {
+      "type": "object",
+      "properties": {
+        "code": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "message": {
+          "type": "string"
+        },
+        "detail": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "data": {
+          "anyOf": [
+            {
+              "type": "object"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "request_id": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{32}$"
+        }
+      },
+      "required": [
+        "code",
+        "message",
+        "detail",
+        "data",
+        "request_id"
+      ],
+      "additionalProperties": false
+    },
+    "LegacyRoleBinding": {
+      "type": "object",
+      "properties": {
+        "enabled": {
+          "type": "boolean"
+        },
+        "selection": {
+          "enum": [
+            "explicit",
+            "follow_role",
+            "follow_execution"
+          ]
+        },
+        "profile_revision_id": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Id"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "credential_revision_id": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Id"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "prompt_revision_id": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Id"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "source_role": {
+          "enum": [
+            "chat",
+            "chat_thinking",
+            "classifier",
+            "planner",
+            "vision",
+            "autocomplete",
+            "ppt_outline",
+            "embedding",
+            "session_title",
+            "auto_tag",
+            "write_assistant",
+            "review_question",
+            "memory_summary",
+            "rag_summarize",
+            "synthesize",
+            "reflection",
+            null
+          ]
+        },
+        "fallback": {
+          "type": "array",
+          "items": {
+            "enum": [
+              "chat",
+              "chat_thinking",
+              "classifier",
+              "planner",
+              "vision",
+              "autocomplete",
+              "ppt_outline",
+              "embedding",
+              "session_title",
+              "auto_tag",
+              "write_assistant",
+              "review_question",
+              "memory_summary",
+              "rag_summarize",
+              "synthesize",
+              "reflection"
+            ]
+          },
+          "uniqueItems": true,
+          "maxItems": 16
+        },
+        "failure_mode": {
+          "enum": [
+            "error",
+            "rule_only",
+            "react_fallback",
+            "disabled",
+            "default_title"
+          ]
+        }
+      },
+      "required": [
+        "enabled",
+        "selection",
+        "prompt_revision_id",
+        "fallback",
+        "failure_mode"
+      ],
+      "additionalProperties": false,
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "enabled": {
+                "const": true
+              },
+              "selection": {
+                "const": "explicit"
+              }
+            },
+            "required": [
+              "enabled",
+              "selection"
+            ]
+          },
+          "then": {
+            "required": [
+              "profile_revision_id",
+              "credential_revision_id"
+            ],
+            "properties": {
+              "profile_revision_id": {
+                "$ref": "#/$defs/Id"
+              },
+              "source_role": {
+                "type": "null"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "selection": {
+                "const": "follow_role"
+              }
+            },
+            "required": [
+              "selection"
+            ]
+          },
+          "then": {
+            "required": [
+              "source_role"
+            ],
+            "properties": {
+              "source_role": {
+                "enum": [
+                  "chat",
+                  "chat_thinking",
+                  "classifier",
+                  "planner",
+                  "vision",
+                  "autocomplete",
+                  "ppt_outline",
+                  "embedding",
+                  "session_title",
+                  "auto_tag",
+                  "write_assistant",
+                  "review_question",
+                  "memory_summary",
+                  "rag_summarize",
+                  "synthesize",
+                  "reflection"
+                ]
+              },
+              "profile_revision_id": {
+                "type": "null"
+              },
+              "credential_revision_id": {
+                "type": "null"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "selection": {
+                "const": "follow_execution"
+              }
+            },
+            "required": [
+              "selection"
+            ]
+          },
+          "then": {
+            "properties": {
+              "source_role": {
+                "type": "null"
+              },
+              "profile_revision_id": {
+                "type": "null"
+              },
+              "credential_revision_id": {
+                "type": "null"
+              }
+            }
+          }
+        }
+      ]
+    },
+    "LegacyStaticBinding": {
+      "type": "object",
+      "properties": {
+        "enabled": {
+          "type": "boolean"
+        },
+        "profile_revision_id": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Id"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "credential_revision_id": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Id"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "credential_version": {
+          "anyOf": [
+            {
+              "type": "integer",
+              "minimum": 1
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "prompt_revision_id": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Id"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "fallback": {
+          "type": "array",
+          "items": {
+            "enum": [
+              "chat",
+              "chat_thinking",
+              "classifier",
+              "planner",
+              "vision",
+              "autocomplete",
+              "ppt_outline",
+              "embedding",
+              "session_title",
+              "auto_tag",
+              "write_assistant",
+              "review_question",
+              "memory_summary",
+              "rag_summarize",
+              "synthesize",
+              "reflection"
+            ]
+          },
+          "uniqueItems": true
+        },
+        "failure_mode": {
+          "enum": [
+            "error",
+            "rule_only",
+            "react_fallback",
+            "disabled",
+            "default_title"
+          ]
+        }
+      },
+      "required": [
+        "enabled",
+        "profile_revision_id",
+        "credential_revision_id",
+        "credential_version",
+        "prompt_revision_id",
+        "fallback",
+        "failure_mode"
+      ],
+      "additionalProperties": false
+    },
+    "LegacyRawRoleBindings": {
+      "type": "object",
+      "properties": {
+        "chat": {
+          "allOf": [
+            {
+              "$ref": "#/$defs/LegacyRoleBinding"
+            },
+            {
+              "properties": {
+                "selection": {
+                  "enum": [
+                    "explicit",
+                    "follow_role"
+                  ]
+                }
+              }
+            },
+            {
+              "if": {
+                "properties": {
+                  "enabled": {
+                    "const": true
+                  }
+                }
+              },
+              "then": {
+                "properties": {
+                  "prompt_revision_id": {
+                    "$ref": "#/$defs/Id"
+                  }
+                }
+              }
+            }
+          ]
+        },
+        "chat_thinking": {
+          "allOf": [
+            {
+              "$ref": "#/$defs/LegacyRoleBinding"
+            },
+            {
+              "properties": {
+                "selection": {
+                  "enum": [
+                    "explicit",
+                    "follow_role"
+                  ]
+                }
+              }
+            },
+            {
+              "if": {
+                "properties": {
+                  "enabled": {
+                    "const": true
+                  }
+                }
+              },
+              "then": {
+                "properties": {
+                  "prompt_revision_id": {
+                    "$ref": "#/$defs/Id"
+                  }
+                }
+              }
+            }
+          ]
+        },
+        "classifier": {
+          "allOf": [
+            {
+              "$ref": "#/$defs/LegacyRoleBinding"
+            },
+            {
+              "properties": {
+                "selection": {
+                  "enum": [
+                    "explicit",
+                    "follow_role"
+                  ]
+                }
+              }
+            },
+            {
+              "if": {
+                "properties": {
+                  "enabled": {
+                    "const": true
+                  }
+                }
+              },
+              "then": {
+                "properties": {
+                  "prompt_revision_id": {
+                    "$ref": "#/$defs/Id"
+                  }
+                }
+              }
+            }
+          ]
+        },
+        "planner": {
+          "allOf": [
+            {
+              "$ref": "#/$defs/LegacyRoleBinding"
+            },
+            {
+              "properties": {
+                "selection": {
+                  "enum": [
+                    "explicit",
+                    "follow_role"
+                  ]
+                }
+              }
+            },
+            {
+              "if": {
+                "properties": {
+                  "enabled": {
+                    "const": true
+                  }
+                }
+              },
+              "then": {
+                "properties": {
+                  "prompt_revision_id": {
+                    "$ref": "#/$defs/Id"
+                  }
+                }
+              }
+            }
+          ]
+        },
+        "vision": {
+          "allOf": [
+            {
+              "$ref": "#/$defs/LegacyRoleBinding"
+            },
+            {
+              "properties": {
+                "selection": {
+                  "enum": [
+                    "explicit",
+                    "follow_role"
+                  ]
+                }
+              }
+            },
+            {
+              "if": {
+                "properties": {
+                  "enabled": {
+                    "const": true
+                  }
+                }
+              },
+              "then": {
+                "properties": {
+                  "prompt_revision_id": {
+                    "$ref": "#/$defs/Id"
+                  }
+                }
+              }
+            }
+          ]
+        },
+        "autocomplete": {
+          "allOf": [
+            {
+              "$ref": "#/$defs/LegacyRoleBinding"
+            },
+            {
+              "properties": {
+                "selection": {
+                  "enum": [
+                    "explicit",
+                    "follow_role"
+                  ]
+                }
+              }
+            },
+            {
+              "if": {
+                "properties": {
+                  "enabled": {
+                    "const": true
+                  }
+                }
+              },
+              "then": {
+                "properties": {
+                  "prompt_revision_id": {
+                    "$ref": "#/$defs/Id"
+                  }
+                }
+              }
+            }
+          ]
+        },
+        "ppt_outline": {
+          "allOf": [
+            {
+              "$ref": "#/$defs/LegacyRoleBinding"
+            },
+            {
+              "properties": {
+                "selection": {
+                  "enum": [
+                    "explicit",
+                    "follow_role"
+                  ]
+                }
+              }
+            },
+            {
+              "if": {
+                "properties": {
+                  "enabled": {
+                    "const": true
+                  }
+                }
+              },
+              "then": {
+                "properties": {
+                  "prompt_revision_id": {
+                    "$ref": "#/$defs/Id"
+                  }
+                }
+              }
+            }
+          ]
+        },
+        "embedding": {
+          "allOf": [
+            {
+              "$ref": "#/$defs/LegacyRoleBinding"
+            },
+            {
+              "properties": {
+                "selection": {
+                  "enum": [
+                    "explicit",
+                    "follow_role"
+                  ]
+                }
+              }
+            },
+            {
+              "properties": {
+                "prompt_revision_id": {
+                  "type": "null"
+                }
+              }
+            }
+          ]
+        },
+        "session_title": {
+          "allOf": [
+            {
+              "$ref": "#/$defs/LegacyRoleBinding"
+            },
+            {
+              "properties": {
+                "selection": {
+                  "enum": [
+                    "explicit",
+                    "follow_role"
+                  ]
+                }
+              }
+            },
+            {
+              "if": {
+                "properties": {
+                  "enabled": {
+                    "const": true
+                  }
+                }
+              },
+              "then": {
+                "properties": {
+                  "prompt_revision_id": {
+                    "$ref": "#/$defs/Id"
+                  }
+                }
+              }
+            }
+          ]
+        },
+        "auto_tag": {
+          "allOf": [
+            {
+              "$ref": "#/$defs/LegacyRoleBinding"
+            },
+            {
+              "properties": {
+                "selection": {
+                  "enum": [
+                    "explicit",
+                    "follow_role"
+                  ]
+                }
+              }
+            },
+            {
+              "if": {
+                "properties": {
+                  "enabled": {
+                    "const": true
+                  }
+                }
+              },
+              "then": {
+                "properties": {
+                  "prompt_revision_id": {
+                    "$ref": "#/$defs/Id"
+                  }
+                }
+              }
+            }
+          ]
+        },
+        "write_assistant": {
+          "allOf": [
+            {
+              "$ref": "#/$defs/LegacyRoleBinding"
+            },
+            {
+              "properties": {
+                "selection": {
+                  "enum": [
+                    "explicit",
+                    "follow_role"
+                  ]
+                }
+              }
+            },
+            {
+              "if": {
+                "properties": {
+                  "enabled": {
+                    "const": true
+                  }
+                }
+              },
+              "then": {
+                "properties": {
+                  "prompt_revision_id": {
+                    "$ref": "#/$defs/Id"
+                  }
+                }
+              }
+            }
+          ]
+        },
+        "review_question": {
+          "allOf": [
+            {
+              "$ref": "#/$defs/LegacyRoleBinding"
+            },
+            {
+              "properties": {
+                "selection": {
+                  "enum": [
+                    "explicit",
+                    "follow_role"
+                  ]
+                }
+              }
+            },
+            {
+              "if": {
+                "properties": {
+                  "enabled": {
+                    "const": true
+                  }
+                }
+              },
+              "then": {
+                "properties": {
+                  "prompt_revision_id": {
+                    "$ref": "#/$defs/Id"
+                  }
+                }
+              }
+            }
+          ]
+        },
+        "memory_summary": {
+          "allOf": [
+            {
+              "$ref": "#/$defs/LegacyRoleBinding"
+            },
+            {
+              "properties": {
+                "selection": {
+                  "enum": [
+                    "explicit",
+                    "follow_role"
+                  ]
+                }
+              }
+            },
+            {
+              "if": {
+                "properties": {
+                  "enabled": {
+                    "const": true
+                  }
+                }
+              },
+              "then": {
+                "properties": {
+                  "prompt_revision_id": {
+                    "$ref": "#/$defs/Id"
+                  }
+                }
+              }
+            }
+          ]
+        },
+        "rag_summarize": {
+          "allOf": [
+            {
+              "$ref": "#/$defs/LegacyRoleBinding"
+            },
+            {
+              "properties": {
+                "selection": {
+                  "enum": [
+                    "explicit",
+                    "follow_role"
+                  ]
+                }
+              }
+            },
+            {
+              "if": {
+                "properties": {
+                  "enabled": {
+                    "const": true
+                  }
+                }
+              },
+              "then": {
+                "properties": {
+                  "prompt_revision_id": {
+                    "$ref": "#/$defs/Id"
+                  }
+                }
+              }
+            }
+          ]
+        },
+        "synthesize": {
+          "allOf": [
+            {
+              "$ref": "#/$defs/LegacyRoleBinding"
+            },
+            {
+              "if": {
+                "properties": {
+                  "enabled": {
+                    "const": true
+                  }
+                }
+              },
+              "then": {
+                "properties": {
+                  "prompt_revision_id": {
+                    "$ref": "#/$defs/Id"
+                  }
+                }
+              }
+            }
+          ]
+        },
+        "reflection": {
+          "allOf": [
+            {
+              "$ref": "#/$defs/LegacyRoleBinding"
+            },
+            {
+              "properties": {
+                "selection": {
+                  "enum": [
+                    "explicit",
+                    "follow_role"
+                  ]
+                }
+              }
+            },
+            {
+              "if": {
+                "properties": {
+                  "enabled": {
+                    "const": true
+                  }
+                }
+              },
+              "then": {
+                "properties": {
+                  "prompt_revision_id": {
+                    "$ref": "#/$defs/Id"
+                  }
+                }
+              }
+            }
+          ]
+        }
+      },
+      "required": [
+        "chat",
+        "chat_thinking",
+        "classifier",
+        "planner",
+        "vision",
+        "autocomplete",
+        "ppt_outline",
+        "embedding",
+        "session_title",
+        "auto_tag",
+        "write_assistant",
+        "review_question",
+        "memory_summary",
+        "rag_summarize",
+        "synthesize",
+        "reflection"
+      ],
+      "additionalProperties": false
+    },
+    "LegacyReleaseManifest": {
+      "type": "object",
+      "properties": {
+        "schema_version": {
+          "const": 1
+        },
+        "role_bindings_raw": {
+          "$ref": "#/$defs/LegacyRawRoleBindings"
+        },
+        "resolved_static_bindings": {
+          "type": "object",
+          "propertyNames": {
+            "enum": [
+              "chat",
+              "chat_thinking",
+              "classifier",
+              "planner",
+              "vision",
+              "autocomplete",
+              "ppt_outline",
+              "embedding",
+              "session_title",
+              "auto_tag",
+              "write_assistant",
+              "review_question",
+              "memory_summary",
+              "rag_summarize",
+              "synthesize",
+              "reflection"
+            ]
+          },
+          "additionalProperties": {
+            "$ref": "#/$defs/LegacyStaticBinding"
+          }
+        },
+        "follow_execution_roles": {
+          "type": "array",
+          "items": {
+            "const": "synthesize"
+          },
+          "maxItems": 1,
+          "uniqueItems": true
+        },
+        "index_bindings": {
+          "$ref": "#/$defs/IndexBindings"
+        }
+      },
+      "required": [
+        "schema_version",
+        "role_bindings_raw",
+        "resolved_static_bindings",
+        "follow_execution_roles",
+        "index_bindings"
+      ],
+      "additionalProperties": false
+    },
+    "ReleaseManifestRead": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/LegacyReleaseManifest"
+        },
+        {
+          "$ref": "#/$defs/ReleaseManifest"
+        },
+        {
+          "$ref": "#/$defs/ReleaseManifestV3"
+        }
+      ]
+    },
+    "MemorySettings": {
+      "type": "object",
+      "properties": {
+        "enabled": {
+          "type": "boolean"
+        },
+        "auto_extract": {
+          "type": "boolean"
+        },
+        "management_mode": {
+          "enum": [
+            "auto",
+            "manual"
+          ]
+        }
+      },
+      "required": [
+        "enabled",
+        "auto_extract",
+        "management_mode"
+      ],
+      "additionalProperties": false
+    },
+    "MemorySettingsInput": {
+      "type": "object",
+      "properties": {
+        "enabled": {
+          "type": "boolean"
+        },
+        "auto_extract": {
+          "type": "boolean"
+        },
+        "management_mode": {
+          "enum": [
+            "auto",
+            "manual"
+          ]
+        }
+      },
+      "required": [],
+      "additionalProperties": false,
+      "minProperties": 1
+    },
+    "MemorySaveInput": {
+      "type": "object",
+      "properties": {
+        "content_md": {
+          "type": "string",
+          "maxLength": 32768,
+          "description": "Additionally enforce <=32768 UTF-8 bytes on server; normalize CRLF to LF before hash/CAS."
+        }
+      },
+      "required": [
+        "content_md"
+      ],
+      "additionalProperties": false
+    },
+    "MemoryClearInput": {
+      "type": "object",
+      "properties": {
+        "purge_history": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "purge_history"
+      ],
+      "additionalProperties": false
+    },
+    "MemoryEmptyInput": {
+      "type": "object",
+      "properties": {},
+      "required": [],
+      "additionalProperties": false
+    },
+    "MemoryPagination": {
+      "type": "object",
+      "properties": {
+        "limit": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 100,
+          "default": 20
+        },
+        "cursor": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 2048
+        }
+      },
+      "required": [],
+      "additionalProperties": false
+    },
+    "MemoryRequestOption": {
+      "type": "object",
+      "properties": {
+        "memory_mode": {
+          "enum": [
+            "auto",
+            "off"
+          ],
+          "default": "auto"
+        }
+      },
+      "required": [],
+      "additionalProperties": false
+    },
+    "MemoryDocument": {
+      "type": "object",
+      "properties": {
+        "exists": {
+          "type": "boolean"
+        },
+        "filename": {
+          "const": "memory.md"
+        },
+        "revision_id": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Id"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "revision_number": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "head_version": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "memory_epoch": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "content_md": {
+          "anyOf": [
+            {
+              "type": "string",
+              "maxLength": 32768
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "content_hash": {
+          "anyOf": [
+            {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "settings": {
+          "$ref": "#/$defs/MemorySettings"
+        },
+        "extraction_available": {
+          "type": "boolean"
+        },
+        "updated_at": {
+          "anyOf": [
+            {
+              "type": "string",
+              "format": "date-time"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "exists",
+        "filename",
+        "revision_id",
+        "revision_number",
+        "head_version",
+        "memory_epoch",
+        "content_md",
+        "content_hash",
+        "settings",
+        "extraction_available",
+        "updated_at"
+      ],
+      "additionalProperties": false,
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "exists": {
+                "const": false
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "revision_id": {
+                "type": "null"
+              },
+              "content_md": {
+                "type": "null"
+              },
+              "content_hash": {
+                "type": "null"
+              },
+              "revision_number": {
+                "const": 0
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "exists": {
+                "const": true
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "revision_id": {
+                "$ref": "#/$defs/Id"
+              },
+              "content_md": {
+                "type": "string",
+                "maxLength": 32768
+              },
+              "content_hash": {
+                "type": "string",
+                "pattern": "^[0-9a-f]{64}$"
+              },
+              "revision_number": {
+                "type": "integer",
+                "minimum": 1
+              }
+            }
+          }
+        }
+      ]
+    },
+    "MemoryExtractionResult": {
+      "type": "object",
+      "properties": {
+        "decision": {
+          "enum": [
+            "no_change",
+            "update"
+          ]
+        },
+        "content_md": {
+          "anyOf": [
+            {
+              "type": "string",
+              "maxLength": 32768
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "evidence": {
+          "type": "array",
+          "maxItems": 64,
+          "items": {
+            "type": "object",
+            "properties": {
+              "source_message_id": {
+                "type": "integer",
+                "minimum": 1
+              },
+              "quote": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 512
+              }
+            },
+            "required": [
+              "source_message_id",
+              "quote"
+            ],
+            "additionalProperties": false
+          }
+        }
+      },
+      "required": [
+        "decision",
+        "content_md",
+        "evidence"
+      ],
+      "additionalProperties": false,
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "decision": {
+                "const": "no_change"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "content_md": {
+                "type": "null"
+              },
+              "evidence": {
+                "maxItems": 0
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "decision": {
+                "const": "update"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "content_md": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 32768
+              },
+              "evidence": {
+                "minItems": 1
+              }
+            }
+          }
+        }
+      ]
+    },
+    "MemorySnapshot": {
+      "type": "object",
+      "properties": {
+        "config_release_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "memory_revision_id": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Id"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "memory_head_version": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "memory_epoch": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "memory_hash": {
+          "anyOf": [
+            {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "selected_sections_hash": {
+          "anyOf": [
+            {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "composer_version": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64
+        },
+        "memory_state": {
+          "enum": [
+            "missing",
+            "off",
+            "empty",
+            "selected",
+            "truncated",
+            "omitted"
+          ]
+        }
+      },
+      "required": [
+        "config_release_id",
+        "memory_revision_id",
+        "memory_head_version",
+        "memory_epoch",
+        "memory_hash",
+        "selected_sections_hash",
+        "composer_version",
+        "memory_state"
+      ],
+      "additionalProperties": false
+    },
+    "CredentialRevocationInput": {
+      "type": "object",
+      "properties": {
+        "reason": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 512
+        }
+      },
+      "required": [
+        "reason"
+      ],
+      "additionalProperties": false
+    },
+    "CredentialRevocationResult": {
+      "type": "object",
+      "properties": {
+        "credential_revision_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "credential_version": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "status": {
+          "const": "revoked"
+        },
+        "revocation_epoch": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "dispatch_blocked": {
+          "const": true
+        },
+        "cancel_requested": {
+          "const": true
+        },
+        "already_revoked": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "credential_revision_id",
+        "credential_version",
+        "status",
+        "revocation_epoch",
+        "dispatch_blocked",
+        "cancel_requested",
+        "already_revoked"
+      ],
+      "additionalProperties": false
+    },
+    "OutboxRedriveInput": {
+      "type": "object",
+      "properties": {
+        "expected_attempts": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 5
+        },
+        "reason": {
+          "const": "operator_retry"
+        }
+      },
+      "required": [
+        "expected_attempts",
+        "reason"
+      ],
+      "additionalProperties": false
+    },
+    "OutboxRedriveResult": {
+      "type": "object",
+      "properties": {
+        "source_event_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "event_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "status": {
+          "const": "pending"
+        },
+        "attempts": {
+          "const": 0
+        },
+        "original_attempts": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 5
+        },
+        "delivery_guarantee": {
+          "const": "at_least_once"
+        },
+        "config_head_changed": {
+          "const": false
+        }
+      },
+      "required": [
+        "source_event_id",
+        "event_id",
+        "status",
+        "attempts",
+        "original_attempts",
+        "delivery_guarantee",
+        "config_head_changed"
+      ],
+      "additionalProperties": false
+    },
+    "RoleKeyV3": {
+      "enum": [
+        "chat",
+        "chat_thinking",
+        "classifier",
+        "planner",
+        "vision",
+        "autocomplete",
+        "ppt_outline",
+        "embedding",
+        "session_title",
+        "auto_tag",
+        "write_assistant",
+        "review_question",
+        "memory_summary",
+        "rag_summarize",
+        "synthesize",
+        "reflection",
+        "memory_extraction",
+        "rag_query_expand"
+      ]
+    },
+    "RawRoleBindingsV3": {
+      "type": "object",
+      "properties": {
+        "chat": {
+          "$ref": "#/$defs/RawRoleBindings/properties/chat"
+        },
+        "chat_thinking": {
+          "$ref": "#/$defs/RawRoleBindings/properties/chat_thinking"
+        },
+        "classifier": {
+          "$ref": "#/$defs/RawRoleBindings/properties/classifier"
+        },
+        "planner": {
+          "$ref": "#/$defs/RawRoleBindings/properties/planner"
+        },
+        "vision": {
+          "$ref": "#/$defs/RawRoleBindings/properties/vision"
+        },
+        "autocomplete": {
+          "$ref": "#/$defs/RawRoleBindings/properties/autocomplete"
+        },
+        "ppt_outline": {
+          "$ref": "#/$defs/RawRoleBindings/properties/ppt_outline"
+        },
+        "embedding": {
+          "$ref": "#/$defs/RawRoleBindings/properties/embedding"
+        },
+        "session_title": {
+          "$ref": "#/$defs/RawRoleBindings/properties/session_title"
+        },
+        "auto_tag": {
+          "$ref": "#/$defs/RawRoleBindings/properties/auto_tag"
+        },
+        "write_assistant": {
+          "$ref": "#/$defs/RawRoleBindings/properties/write_assistant"
+        },
+        "review_question": {
+          "$ref": "#/$defs/RawRoleBindings/properties/review_question"
+        },
+        "memory_summary": {
+          "$ref": "#/$defs/RawRoleBindings/properties/memory_summary"
+        },
+        "rag_summarize": {
+          "$ref": "#/$defs/RawRoleBindings/properties/rag_summarize"
+        },
+        "synthesize": {
+          "$ref": "#/$defs/RawRoleBindings/properties/synthesize"
+        },
+        "reflection": {
+          "$ref": "#/$defs/RawRoleBindings/properties/reflection"
+        },
+        "memory_extraction": {
+          "$ref": "#/$defs/RawRoleBindings/properties/memory_extraction"
+        },
+        "rag_query_expand": {
+          "allOf": [
+            {
+              "$ref": "#/$defs/RoleBinding"
+            },
+            {
+              "properties": {
+                "selection": {
+                  "const": "explicit"
+                },
+                "fallback": {
+                  "maxItems": 0
+                },
+                "source_role": {
+                  "type": "null"
+                },
+                "failure_mode": {
+                  "const": "disabled"
+                }
+              }
+            },
+            {
+              "if": {
+                "properties": {
+                  "enabled": {
+                    "const": true
+                  }
+                }
+              },
+              "then": {
+                "properties": {
+                  "prompt_revision_id": {
+                    "$ref": "#/$defs/Id"
+                  }
+                }
+              }
+            }
+          ]
+        }
+      },
+      "required": [
+        "chat",
+        "chat_thinking",
+        "classifier",
+        "planner",
+        "vision",
+        "autocomplete",
+        "ppt_outline",
+        "embedding",
+        "session_title",
+        "auto_tag",
+        "write_assistant",
+        "review_question",
+        "memory_summary",
+        "rag_summarize",
+        "synthesize",
+        "reflection",
+        "memory_extraction",
+        "rag_query_expand"
+      ],
+      "additionalProperties": false
+    },
+    "DraftPayloadV2": {
+      "type": "object",
+      "properties": {
+        "schema_version": {
+          "const": 2
+        },
+        "role_bindings_raw": {
+          "$ref": "#/$defs/RawRoleBindings"
+        },
+        "index_bindings": {
+          "$ref": "#/$defs/IndexBindings"
+        }
+      },
+      "required": [
+        "schema_version",
+        "role_bindings_raw",
+        "index_bindings"
+      ],
+      "additionalProperties": false
+    },
+    "DraftPayloadV3": {
+      "type": "object",
+      "properties": {
+        "schema_version": {
+          "const": 3
+        },
+        "role_bindings_raw": {
+          "$ref": "#/$defs/RawRoleBindingsV3"
+        },
+        "index_bindings": {
+          "$ref": "#/$defs/IndexBindings"
+        }
+      },
+      "required": [
+        "schema_version",
+        "role_bindings_raw",
+        "index_bindings"
+      ],
+      "additionalProperties": false
+    },
+    "ReleaseManifestV3": {
+      "type": "object",
+      "properties": {
+        "schema_version": {
+          "const": 3
+        },
+        "role_bindings_raw": {
+          "$ref": "#/$defs/RawRoleBindingsV3"
+        },
+        "resolved_static_bindings": {
+          "type": "object",
+          "propertyNames": {
+            "$ref": "#/$defs/RoleKeyV3"
+          },
+          "additionalProperties": {
+            "$ref": "#/$defs/StaticBinding"
+          },
+          "required": [
+            "rag_query_expand"
+          ],
+          "properties": {
+            "rag_query_expand": {
+              "properties": {
+                "fallback": {
+                  "maxItems": 0
+                },
+                "failure_mode": {
+                  "const": "disabled"
+                }
+              }
+            }
+          }
+        },
+        "follow_execution_roles": {
+          "type": "array",
+          "items": {
+            "const": "synthesize"
+          },
+          "maxItems": 1,
+          "uniqueItems": true
+        },
+        "index_bindings": {
+          "$ref": "#/$defs/IndexBindings"
+        }
+      },
+      "required": [
+        "schema_version",
+        "role_bindings_raw",
+        "resolved_static_bindings",
+        "follow_execution_roles",
+        "index_bindings"
+      ],
+      "additionalProperties": false
+    }
+  }
+}

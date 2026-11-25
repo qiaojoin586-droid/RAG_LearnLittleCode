@@ -11,9 +11,10 @@ model_traces 为高写入量日志表：
 """
 
 from datetime import datetime
+from decimal import Decimal
 
 from sqlalchemy import (
-    String, Text, DateTime, Integer, BigInteger, Float, Boolean, func, Index,
+    String, Text, DateTime, Integer, BigInteger, Float, Boolean, Numeric, JSON, func, Index,
 )
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -32,7 +33,7 @@ class ModelTrace(Base):
     # 主键：自增 ID
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
 
-    # 请求 ID（12 位 hex；后台任务可能为空）
+    # 新请求为 32 位 hex；保留历史 12 位值，后台任务可能为空。
     request_id: Mapped[str | None] = mapped_column(String(32), nullable=True, index=True)
 
     # 归属用户 / 会话（后台任务可能为空）
@@ -44,6 +45,25 @@ class ModelTrace(Base):
 
     # 模型名（可能为 "unknown"，见 model_trace._extract_model 兼容性风险）
     model: Mapped[str | None] = mapped_column(String(100), nullable=True)
+
+    # Historical rows remain nullable; never invent a configuration or price version.
+    release_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    memory_context: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    index_context: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    profile_revision_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    prompt_revision_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    credential_revision_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    credential_version: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    price_version_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    is_test: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="0")
+    adapter_type: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    provider_origin: Mapped[str | None] = mapped_column(String(320), nullable=True)
+    workflow_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    step_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    usage_status: Mapped[str | None] = mapped_column(String(24), nullable=True)
+    cost_amount: Mapped[Decimal | None] = mapped_column(Numeric(20, 10), nullable=True)
+    cost_currency: Mapped[str | None] = mapped_column(String(3), nullable=True)
+    pricing_status: Mapped[str | None] = mapped_column(String(32), nullable=True)
 
     # Token 用量（流式调用为 null，已知限制）
     prompt_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)

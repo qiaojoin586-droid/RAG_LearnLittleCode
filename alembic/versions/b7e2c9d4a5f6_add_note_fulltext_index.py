@@ -13,7 +13,8 @@ Create Date: 2026-08-21
 """
 from typing import Sequence, Union
 
-from alembic import op
+from alembic import context, op
+import sqlalchemy as sa
 
 
 # revision identifiers, used by Alembic.
@@ -25,6 +26,10 @@ depends_on: Union[str, Sequence[str], None] = None
 
 def upgrade() -> None:
     """添加 FULLTEXT 索引（InnoDB 支持 FULLTEXT，MySQL 5.7+）"""
+    if not context.is_offline_mode():
+        indexes = sa.inspect(op.get_bind()).get_indexes('notes')
+        if any(index['name'] == 'ft_notes_title_content' for index in indexes):
+            return
     op.execute(
         "ALTER TABLE notes ADD FULLTEXT INDEX ft_notes_title_content "
         "(title, content) WITH PARSER ngram"

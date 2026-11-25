@@ -10,6 +10,8 @@
 - MemoryCompressor: 构建压缩后的消息上下文
 - check_and_summarize: 异步检查并触发摘要生成
 """
+from app.model_config.runtime import model_for, template_for
+from app.model_config.snapshots import current_snapshot
 
 from typing import List, Tuple, Optional
 
@@ -215,6 +217,9 @@ async def generate_incremental_summary(
     Returns:
         新摘要文本
     """
+    chat_model = model_for('memory_summary', chat_model)
+    if chat_model is None:
+        return existing_summary
     # 格式化新消息（附件以占位符描述，不展开图片——摘要只关心文字语义）
     formatted = []
     for msg in new_messages:
@@ -230,7 +235,7 @@ async def generate_incremental_summary(
         formatted.append(f"[{role_label}]: {content}")
     
     # 构建 prompt
-    prompt = SUMMARY_PROMPT.format(
+    prompt = template_for("memory_summary", SUMMARY_PROMPT, existing_summary=existing_summary or "（暂无历史摘要）", new_messages="\n\n".join(formatted)) if current_snapshot() else SUMMARY_PROMPT.format(
         existing_summary=existing_summary or "（暂无历史摘要）",
         new_messages="\n\n".join(formatted),
     )

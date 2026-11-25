@@ -1,0 +1,34 @@
+{
+  "schema_version": 1,
+  "semantic_identity": {
+    "schema_version": 1,
+    "vendor": "ollama",
+    "model": "REPLACE_WITH_ORIGINAL_MODEL_NAME",
+    "weights_revision": "sha256:REPLACE_WITH_ORIGINAL_64_HEX_DIGEST",
+    "dimension": 1024,
+    "normalization": "provider",
+    "input_preprocessing": "utf8-verbatim-v1",
+    "document_prefix": "",
+    "query_prefix": "",
+    "pooling": "provider",
+    "parameters": {}
+  },
+  "provider_origin": "http://localhost:11434",
+  "api_protocol": "ollama_embed",
+  "build_reference": "REPLACE_WITH_AUDITED_BUILD_RECORD_REFERENCE",
+  "parser_version": "REPLACE_WITH_ORIGINAL_PARSER_VERSION",
+  "chunker_version": "REPLACE_WITH_ORIGINAL_CHUNKER_VERSION",
+  "source_watermark": "REPLACE_WITH_REVIEWED_SOURCE_WATERMARK",
+  "collections": {
+    "rag": {
+      "collection_name": "rag_collection",
+      "collection_id": "REPLACE_WITH_EXISTING_RAG_COLLECTION_UUID",
+      "dimension": 1024
+    },
+    "notes": {
+      "collection_name": "notes_collection",
+      "collection_id": "REPLACE_WITH_EXISTING_NOTES_COLLECTION_UUID",
+      "dimension": 1024
+    }
+  }
+}

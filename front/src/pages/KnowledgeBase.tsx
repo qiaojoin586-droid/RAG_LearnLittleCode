@@ -2,7 +2,7 @@
  * 知识库管理页面
  * 
  * 功能：
- * 1. 拖拽 / 点击上传文档（SSE 实时进度条）
+ * 1. 拖拽 / 点击上传文档并查看持久任务进度
  * 2. 文档列表展示 + 删除
  * 3. 文档详情抽屉（查看切片信息）
  */
@@ -14,128 +14,49 @@ import { Upload, FileText, Trash2, CheckCircle, AlertCircle } from 'lucide-react
 import { knowledgeApi } from '../api/knowledge';
 import EmptyState from '../components/common/EmptyState';
 import ConfirmDialog from '../components/common/ConfirmDialog';
-import type { KnowledgeDocument, KnowledgeSSEMessage } from '../types/api';
+import type { KnowledgeDocument } from '../types/api';
+import { useKnowledgeUploads } from '../hooks/useKnowledgeUploads';
 
-/** 上传文件进度状态 */
-interface UploadProgress {
-  filename: string;
-  progress: number;
-  stage: string;
-  status: 'uploading' | 'completed' | 'error';
-  message?: string;
-}
+const uploadStages: Record<string, string> = {
+  preparing: '准备上传', queued: '等待入库', parsing: '解析文档',
+  splitting: '文本切片', vectorizing: '写入索引', complete: '完成',
+};
 
 export default function KnowledgeBase() {
   const { t } = useTranslation();
 
   const [documents, setDocuments] = useState<KnowledgeDocument[]>([]);
   const [loading, setLoading] = useState(true);
-  const [uploads, setUploads] = useState<UploadProgress[]>([]);
   const [deleteId, setDeleteId] = useState<number | null>(null);
   const [dragOver, setDragOver] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const documentRequest = useRef(0);
 
-  /** 加载文档列表 */
-  useEffect(() => {
-    (async () => {
-      try {
-        const res = await knowledgeApi.listDocuments();
-        setDocuments(res.data.data.documents);
-      } catch { /* ignore */ }
-      finally { setLoading(false); }
-    })();
-  }, []);
-
-  /**
-   * 处理文件上传（SSE 流式进度）
-   * 使用原生 fetch 读取 SSE 事件流，实时更新进度条
-   */
-  const handleFileUpload = useCallback(async (file: File) => {
-    const newUpload: UploadProgress = {
-      filename: file.name,
-      progress: 0,
-      stage: '准备上传',
-      status: 'uploading',
-    };
-    setUploads((prev) => [...prev, newUpload]);
-
+  const refreshDocuments = useCallback(async (signal: AbortSignal) => {
+    const request = ++documentRequest.current;
     try {
-      const response = await knowledgeApi.upload(file);
-      const reader = response.body?.getReader();
-      if (!reader) throw new Error('无法读取响应流');
-
-      const decoder = new TextDecoder();
-      let buffer = '';
-
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-
-        buffer += decoder.decode(value, { stream: true });
-        // 按行解析 SSE 事件
-        const lines = buffer.split('\n');
-        buffer = lines.pop() || ''; // 最后一行可能不完整，保留
-
-        for (const line of lines) {
-          if (!line.startsWith('data:')) continue;
-          const jsonStr = line.slice(5).trim();
-          if (!jsonStr) continue;
-
-          try {
-            const event: KnowledgeSSEMessage = JSON.parse(jsonStr);
-
-            if (event.event_type === 'processing') {
-              setUploads((prev) =>
-                prev.map((u) =>
-                  u.filename === file.name
-                    ? { ...u, progress: event.progress || 0, stage: event.stage || '' }
-                    : u
-                )
-              );
-            } else if (event.event_type === 'completed') {
-              setUploads((prev) =>
-                prev.map((u) =>
-                  u.filename === file.name
-                    ? { ...u, progress: 100, status: 'completed', stage: '完成' }
-                    : u
-                )
-              );
-              // 刷新文档列表
-              const res = await knowledgeApi.listDocuments();
-              setDocuments(res.data.data.documents);
-            } else if (event.event_type === 'error') {
-              setUploads((prev) =>
-                prev.map((u) =>
-                  u.filename === file.name
-                    ? { ...u, status: 'error', message: event.message || '上传失败' }
-                    : u
-                )
-              );
-            } else if (event.event_type === 'finish') {
-              // 所有文件处理完毕
-              break;
-            }
-          } catch {
-            // 忽略 JSON 解析错误
-          }
-        }
+      const response = await knowledgeApi.listDocuments(signal);
+      if (!signal.aborted && request === documentRequest.current) {
+        setDocuments(response.data.data.documents);
       }
-    } catch (err) {
-      setUploads((prev) =>
-        prev.map((u) =>
-          u.filename === file.name
-            ? { ...u, status: 'error', message: err instanceof Error ? err.message : '上传失败' }
-            : u
-        )
-      );
+    } catch { /* Upload progress is read from the durable job. */ }
+    finally {
+      if (!signal.aborted && request === documentRequest.current) setLoading(false);
     }
   }, []);
+  const { uploads, uploadFile, clearCompleted } = useKnowledgeUploads(refreshDocuments);
+
+  useEffect(() => {
+    const load = new AbortController();
+    void refreshDocuments(load.signal);
+    return () => load.abort();
+  }, [refreshDocuments]);
 
   /** 文件选择回调 */
   const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     const files = e.target.files;
     if (!files) return;
-    Array.from(files).forEach(handleFileUpload);
+    Array.from(files).forEach(uploadFile);
     // 清空 input 以允许重复选择同一文件
     e.target.value = '';
   };
@@ -146,7 +67,7 @@ export default function KnowledgeBase() {
     setDragOver(false);
     const files = e.dataTransfer.files;
     if (files.length > 0) {
-      Array.from(files).forEach(handleFileUpload);
+      Array.from(files).forEach(uploadFile);
     }
   };
 
@@ -155,17 +76,13 @@ export default function KnowledgeBase() {
     if (deleteId === null) return;
     try {
       await knowledgeApi.deleteDocument(deleteId);
-      setDocuments(documents.filter((d) => d.id !== deleteId));
+      documentRequest.current++;
+      setDocuments((previous) => previous.filter((d) => d.id !== deleteId));
       toast.success('已删除');
     } catch {
       toast.error(t('common.error'));
     }
     setDeleteId(null);
-  };
-
-  /** 清除已完成的上传记录 */
-  const clearCompleted = () => {
-    setUploads((prev) => prev.filter((u) => u.status === 'uploading'));
   };
 
   /** 格式化文件大小 */
@@ -225,9 +142,9 @@ export default function KnowledgeBase() {
               清除已完成
             </button>
           </div>
-          {uploads.map((upload, idx) => (
+          {uploads.map((upload) => (
             <div
-              key={idx}
+              key={upload.id}
               className="flex items-center gap-3 p-3 bg-[var(--color-card)] rounded-[var(--radius-md)] border border-[var(--color-border)]"
             >
               {/* 状态图标 */}
@@ -245,8 +162,10 @@ export default function KnowledgeBase() {
                   <span className="text-sm text-[var(--color-text)] truncate">
                     {upload.filename}
                   </span>
-                  <span className="text-xs text-[var(--color-text-tertiary)] ml-2">
-                    {upload.status === 'error' ? upload.message : `${upload.progress}% · ${upload.stage}`}
+                  <span role="status" className="text-xs text-[var(--color-text-tertiary)] ml-2">
+                    {upload.status === 'error' ? upload.message : upload.stage === 'reconnecting'
+                      ? t('knowledge.reconnecting')
+                      : `${upload.progress}% · ${uploadStages[upload.stage] ?? upload.stage}`}
                   </span>
                 </div>
                 <div className="w-full h-1.5 bg-[var(--color-border)] rounded-full overflow-hidden">

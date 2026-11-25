@@ -1,0 +1,23 @@
+{
+  "version": "m3-14-local-v1",
+  "approved_on": "2026-11-24",
+  "approval_scope": "User approved local adoption criteria before observing results",
+  "fixture_sha256": "0eaca5626632374de598bc5a1c278e37bf588f1ebd4a8c180828267ef951cf6b",
+  "categories": ["exact", "short", "paraphrase", "multi", "unanswerable", "access"],
+  "min_questions": 100,
+  "min_per_category": 10,
+  "min_ndcg_gain": {"B": 0.0, "C": 0.01, "D": 0.01},
+  "min_recall_gain": 0.0,
+  "min_locator_accuracy": 1.0,
+  "max_forbidden_disclosures": 0,
+  "max_p95_ms": 1000,
+  "max_external_cny_per_success": 0,
+  "per_source_k": 20,
+  "final_k": 5,
+  "concurrency": 4,
+  "order_seed": 20261124,
+  "embedding": "qwen3-embedding:0.6b",
+  "generation": "qwen3:0.6b",
+  "encoder_revision": "onnx-community/bge-reranker-v2-m3-ONNX@6f5ff65298512715a1e669753bc754d2bc8f367b",
+  "encoder_sha256": "912fc1215c2dbff6499700534bd8d31253af01573861abbfc43afd1fab6cce5d"
+}

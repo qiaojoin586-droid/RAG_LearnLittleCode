@@ -16,6 +16,7 @@ SSE 格式化仍由路由层（chat.py）完成，事件类型与顺序契约零
 """
 
 import asyncio
+from contextlib import aclosing
 import time
 from dataclasses import dataclass, field
 from typing import Any, AsyncGenerator, List, Optional
@@ -24,8 +25,12 @@ from langchain_core.messages import HumanMessage, SystemMessage
 
 from app.ai_service.agent_runner import execute_agent
 from app.ai_service.plan_execute_agent import execute_plan_agent
+from app.ai_service.plan_checkpoints import PlanCheckpoint
 from app.ai_service.reflection import build_repair_note, critique_answer
+from app.ai_service.tool_operations import ToolTurn
+from app.ai_service.workflows import ChatWorkflow
 from app.core.logger_handler import logger
+from app.core.failed_response import ErrorCode
 from app.utils.config import get_reflection_config
 from app.utils.reflection_metrics import record_reflection_metric
 
@@ -49,6 +54,10 @@ class ChatRouteContext:
     attachment_names: Optional[list] = None                  # 附件文件名（Plan 摘要注入）
     react_timeout: int = 60               # ReAct 路径超时（上游传 LLM_STREAM_TIMEOUT）
     plan_timeout: int = 120               # Plan 路径超时（上游传 LLM_STREAM_TIMEOUT * 2）
+    tool_turn: ToolTurn | None = None
+    workflow: ChatWorkflow | None = None
+    plan_checkpoint: PlanCheckpoint | None = None
+    recovered_operations: dict = field(default_factory=dict)
 
 
 def decide_route(complexity: str, plan_model_available: bool) -> str:
@@ -99,7 +108,7 @@ async def react_events(ctx: ChatRouteContext, timeout: int) -> AsyncGenerator[di
     for attempt in range(max_repairs + 1):
         failed_tool = None
         error_event = None
-        async for event in execute_agent(
+        async with aclosing(execute_agent(
             chat_model=ctx.agent_model,
             user_id=ctx.user_id,
             user_message=ctx.user_message + repair_note,
@@ -112,28 +121,29 @@ async def react_events(ctx: ChatRouteContext, timeout: int) -> AsyncGenerator[di
             ppt_service=ctx.ppt_service,
             timeout=timeout,
             attachment_content=ctx.attachment_content,
-        ):
-            event_type = event.get("type", "")
-            # 跟踪流内最后失败的工具（供修复轮定向 + no_retry_tools 判定）
-            if event_type == "tool_end" and event.get("error"):
-                failed_tool = event.get("name")
-            if event_type == "response":
-                full_response += event.get("content", "")
-                yield event
-            elif event_type == "error":
-                error_event = event  # 拦截：先决定是否重试，不立即透传
-                break
-            # ★ 简单路径补转发工具事件（§6.3 第 2 段，行为变更提示见设计方案）：
-            # 此前连 tool_start/tool_end 都不转发，补上后简单对话中的工具状态
-            # （含 generate_ppt_tool 的生成进度）对前端可见
-            elif event_type in ("tool_start", "tool_end", "tool_file"):
-                yield event
-            # ★ 思考过程实时转发（审查 B+C）：深度思考模式下 reasoning_content
-            # 作为 thinking 事件推送，前端显示思考进度（消除零反馈等待焦虑）
-            elif event_type == "thinking":
-                yield event
-            elif event_type == "stream_done":
-                full_response = event.get("full_response", full_response)
+        )) as _owned_stream_3:
+            async for event in _owned_stream_3:
+                event_type = event.get("type", "")
+                # 跟踪流内最后失败的工具（供修复轮定向 + no_retry_tools 判定）
+                if event_type == "tool_end" and event.get("error"):
+                    failed_tool = event.get("name")
+                if event_type == "response":
+                    full_response += event.get("content", "")
+                    yield event
+                elif event_type == "error":
+                    error_event = event  # 拦截：先决定是否重试，不立即透传
+                    break
+                # ★ 简单路径补转发工具事件（§6.3 第 2 段，行为变更提示见设计方案）：
+                # 此前连 tool_start/tool_end 都不转发，补上后简单对话中的工具状态
+                # （含 generate_ppt_tool 的生成进度）对前端可见
+                elif event_type in ("tool_start", "tool_end", "tool_file"):
+                    yield event
+                # ★ 思考过程实时转发（审查 B+C）：深度思考模式下 reasoning_content
+                # 作为 thinking 事件推送，前端显示思考进度（消除零反馈等待焦虑）
+                elif event_type == "thinking":
+                    yield event
+                elif event_type == "stream_done":
+                    full_response = event.get("full_response", full_response)
             # 其余事件不转发（与现状一致）
 
         if error_event is None:
@@ -146,6 +156,9 @@ async def react_events(ctx: ChatRouteContext, timeout: int) -> AsyncGenerator[di
             break
 
         # 失败 → L2 判定：关闭 / no_retry_tools / 轮次耗尽 → 透传 error 终止
+        if error_event.get("retryable") is False or error_event.get("code") == ErrorCode.MODEL_CONTEXT_EXCEEDED:
+            yield error_event
+            return
         if not l2_enable or failed_tool in no_retry_tools or attempt >= max_repairs:
             if failed_tool in no_retry_tools:
                 logger.warning(f"L2 修复跳过: 工具 {failed_tool} 在 no_retry_tools（避免副作用），error 直接透传")
@@ -164,7 +177,9 @@ async def react_events(ctx: ChatRouteContext, timeout: int) -> AsyncGenerator[di
         full_response = ""  # 丢弃失败尝试的部分输出，修复轮重新累计
 
     # ===== ReAct 路径 L1 结果自检（P2 增强 3：分段流式）=====
-    if not react_l1_enable or ctx.plan_model is None:
+    from app.model_config.runtime import model_for
+    critic_model=model_for('reflection',ctx.plan_model)
+    if not react_l1_enable or critic_model is None:
         return
     if len(full_response) < min_answer_chars:
         return  # 短回答不检（零额外调用）
@@ -172,7 +187,7 @@ async def react_events(ctx: ChatRouteContext, timeout: int) -> AsyncGenerator[di
     yield {"type": "reflection", "stage": "checking", "round": 0}
     t0 = time.monotonic()
     verdict = await critique_answer(
-        ctx.plan_model, ctx.user_message,
+        critic_model, ctx.user_message,
         "ReAct 直接回答（无执行计划）",
         "（ReAct 模式无分步执行结果，请结合用户问题与一般事实校验回答的完整性与诚实性）",
         full_response, timeout=critic_timeout,
@@ -185,20 +200,21 @@ async def react_events(ctx: ChatRouteContext, timeout: int) -> AsyncGenerator[di
         refine_rounds = 1
         yield {"type": "reflection", "stage": "refining", "round": 1}
         refine_prompt = (
-            f"你之前对用户问题「{ctx.user_message[:500]}」的回答未通过质量评审。\n\n"
+            f"你之前对用户问题「{ctx.user_message}」的回答未通过质量评审。\n\n"
             f"上一版回答：\n{full_response[:4000]}\n\n"
             f"评审意见（必须修正的问题）：\n{verdict.issues}\n\n"
             "请输出修正后的完整回答（只输出回答正文，不要解释修改过程）。"
         )
         messages = [
-            SystemMessage(content=ctx.system_prompt[:2000]),
+            SystemMessage(content=ctx.system_prompt),
             HumanMessage(content=refine_prompt),
         ]
         try:
             async with asyncio.timeout(timeout):
-                async for chunk in ctx.agent_model.astream(messages):
-                    if hasattr(chunk, "content") and chunk.content:
-                        yield {"type": "response", "content": chunk.content}
+                async with aclosing(ctx.agent_model.astream(messages)) as _owned_stream_2:
+                    async for chunk in _owned_stream_2:
+                        if hasattr(chunk, "content") and chunk.content:
+                            yield {"type": "response", "content": chunk.content}
         except asyncio.TimeoutError:
             logger.warning("ReAct L1 修正超时（草稿已流出，不兜底）")
         except Exception as e:
@@ -239,7 +255,7 @@ async def plan_events(
         "tool_file",   # ★ 新增：PPT 生成事件（§6.3 第 2 段）
         "reflection",  # ★ 新增：L1 综合后自检状态事件（AI对话Reflection反思机制设计方案.md）
     }
-    async for event in execute_plan_agent(
+    async with aclosing(execute_plan_agent(
         chat_model=ctx.agent_model,
         plan_model=ctx.plan_model,
         user_id=ctx.user_id,
@@ -254,19 +270,23 @@ async def plan_events(
         timeout=timeout,
         attachment_content=ctx.attachment_content,
         attachment_names=ctx.attachment_names,
-    ):
-        event_type = event.get("type", "")
-        if event_type == "plan_fallback":
-            # Plan 失败，降级为 ReAct 重跑
-            logger.info(f"Plan 降级: {event.get('reason', '')}")
-            yield event
-            async for fallback_event in react_events(ctx, timeout=fallback_timeout):
-                yield fallback_event
-            return
-        if event_type in ("response", "error") or event_type in forwarded:
-            yield event
-            if event_type == "error":
+        checkpoint=ctx.plan_checkpoint,
+        recovered_operations=getattr(ctx, 'recovered_operations', None),
+    )) as _owned_stream_1:
+        async for event in _owned_stream_1:
+            event_type = event.get("type", "")
+            if event_type == "plan_fallback":
+                # Plan 失败，降级为 ReAct 重跑
+                logger.info(f"Plan 降级: {event.get('reason', '')}")
+                yield event
+                async with aclosing(react_events(ctx, timeout=fallback_timeout)) as _owned_stream_0:
+                    async for fallback_event in _owned_stream_0:
+                        yield fallback_event
                 return
+            if event_type in ("response", "error") or event_type in forwarded:
+                yield event
+                if event_type == "error":
+                    return
         # stream_done 不转发（与现状一致）
 
 

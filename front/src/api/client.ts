@@ -40,7 +40,7 @@ client.interceptors.request.use((config) => {
 /** 是否正在刷新 Token */
 let isRefreshing = false;
 /** 等待刷新完成的请求队列 */
-let pendingQueue: Array<(token: string) => void> = [];
+let pendingQueue: Array<{ resolve: (token: string) => void; reject: (error: unknown) => void }> = [];
 
 /**
  * 响应拦截器 — 401 自动刷新 Token
@@ -57,7 +57,10 @@ client.interceptors.response.use(
     const originalRequest = error.config as InternalAxiosRequestConfig & { _retry?: boolean };
 
     // 401 且不是 refresh 请求本身、且没重试过
-    if (error.response?.status === 401 && !originalRequest._retry) {
+    const code = (error.response?.data as { code?: number } | undefined)?.code;
+    const tokenInvalid = code === 40101 || code === 40102;
+    if (error.response?.status === 401 && tokenInvalid && originalRequest &&
+        !originalRequest._retry && !originalRequest.url?.endsWith('/auth/refresh')) {
       const refreshToken = localStorage.getItem('jwt_refresh_token');
 
       // 无 refreshToken → 直接登出
@@ -68,10 +71,12 @@ client.interceptors.response.use(
 
       // 已在刷新中 → 排队等待
       if (isRefreshing) {
-        return new Promise((resolve) => {
-          pendingQueue.push((newToken: string) => {
-            originalRequest.headers.Authorization = `Bearer ${newToken}`;
-            resolve(client(originalRequest));
+        originalRequest._retry = true;
+        return new Promise((resolve, reject) => {
+          pendingQueue.push({ resolve: (newToken: string) => {
+              originalRequest.headers.Authorization = `Bearer ${newToken}`;
+              resolve(client(originalRequest));
+            }, reject,
           });
         });
       }
@@ -94,12 +99,13 @@ client.interceptors.response.use(
         originalRequest.headers.Authorization = `Bearer ${access_token}`;
 
         // 通知队列中的请求
-        pendingQueue.forEach((cb) => cb(access_token));
+        pendingQueue.forEach((pending) => pending.resolve(access_token));
         pendingQueue = [];
 
         return client(originalRequest);
       } catch {
         // refresh 失败 → 彻底登出
+        pendingQueue.forEach((pending) => pending.reject(error));
         pendingQueue = [];
         handleLogout();
         return Promise.reject(error);

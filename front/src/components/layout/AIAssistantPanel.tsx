@@ -22,7 +22,7 @@ import { useEffect, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import {
   History, Plus, X, Search, FileText, HelpCircle, Send, Square,
-  Brain, Paperclip, Presentation, Trash2, Pencil, RefreshCw, MessageSquare, Check,
+  Brain, Paperclip, Presentation, Trash2, Pencil, RefreshCw, MessageSquare, Check, Timer,
 } from 'lucide-react';
 import { useChatComposer } from '../../hooks/useChatComposer';
 import { useUserStore } from '../../stores/useUserStore';
@@ -31,6 +31,7 @@ import MessageBubble from '../chat/MessageBubble';
 import AttachmentBar from '../chat/AttachmentBar';
 import NotePicker from '../chat/NotePicker';
 import TemplatePicker from '../chat/TemplatePicker';
+import ToolApprovals from '../chat/ToolApprovals';
 
 /** 浮层视图：对话 / 历史会话 */
 export type AssistantView = 'chat' | 'history';
@@ -441,6 +442,10 @@ export default function AIAssistantPanel({ isVisible, view, onViewChange, onClos
             )}
           </div>
 
+          {isVisible && chat.currentSessionId && (
+            <ToolApprovals key={chat.currentSessionId} sessionId={chat.currentSessionId} streaming={chat.isStreaming} />
+          )}
+
           {/* ===== 对话视图：输入区 ===== */}
           <div
             className="px-4 pb-3 border-t shrink-0"
@@ -450,7 +455,7 @@ export default function AIAssistantPanel({ isVisible, view, onViewChange, onClos
             }}
           >
             {/* 工具按钮行：附件 / 深度思考 / 引用笔记 / PPT 模板（图标 + 文字，Tooltip 同 title） */}
-            <div className="flex items-center gap-1.5 pt-2.5 pb-1.5">
+            <div className="flex flex-wrap items-center gap-1.5 pt-2.5 pb-1.5">
               {/* 附件上传按钮 */}
               <button
                 onClick={() => chat.fileInputRef.current?.click()}
@@ -487,6 +492,23 @@ export default function AIAssistantPanel({ isVisible, view, onViewChange, onClos
               >
                 <Brain size={14} />
                 {t('chat.thinkingMode')}
+              </button>
+
+              <button
+                type="button"
+                aria-pressed={chat.continueOnDisconnect}
+                disabled={chat.isStreaming}
+                onClick={() => chat.setContinueOnDisconnect(!chat.continueOnDisconnect)}
+                className={`flex min-h-11 items-center gap-1 px-2.5 rounded-lg border text-xs font-medium
+                  transition-colors focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-white disabled:opacity-50 ${
+                    chat.continueOnDisconnect
+                      ? 'border-white/50 text-white bg-white/20'
+                      : 'border-white/30 text-white/80 hover:bg-white/10 hover:text-white'
+                  }`}
+                title={t('chat.backgroundModeHelp')}
+              >
+                <Timer size={14} aria-hidden="true" />
+                {t('chat.backgroundMode')}
               </button>
 
               {/* 引用笔记按钮 */}

@@ -1,0 +1,22 @@
+.memory-page { max-width: 1120px; }
+.memory-settings { display: flex; flex-wrap: wrap; align-items: center; gap: 20px; margin: 18px 0; border: none; padding: 0; }
+.memory-settings > label { flex: 1 1 220px; }
+.memory-settings .mc-checkbox { flex: 1 1 230px; }
+.memory-editor-tabs { margin: 22px 0 14px; }
+.memory-editor-tabs [aria-pressed=true] { color: var(--color-accent); border-color: var(--color-accent); }
+.model-config .memory-textarea { font-family: var(--font-mono), var(--font-body); font-size: 14px; }
+.memory-section { margin-top: 22px; }
+.memory-section h2 { display: flex; align-items: center; gap: 9px; margin-bottom: 10px; }
+.memory-preview { min-height: 160px; overflow-wrap: anywhere; padding: 18px; line-height: 1.8; border: 1px solid var(--color-border); border-radius: var(--radius-md); background: var(--color-surface-alt); margin: 12px 0; }
+.memory-preview h1, .memory-preview h2, .memory-preview h3 { margin: 18px 0 10px; }
+.memory-preview pre, .memory-diff pre { white-space: pre-wrap; overflow-wrap: anywhere; max-height: 480px; overflow: auto; font-family: var(--font-mono), var(--font-body); font-size: 13px; }
+.memory-preview ul, .memory-preview ol { padding-left: 24px; }
+.memory-preview ul { list-style: disc; }
+.memory-job { padding: 16px 0; border-top: 1px solid var(--color-border); }
+.memory-diff { display: grid; grid-template-columns: minmax(0,1fr) minmax(0,1fr); gap: 16px; margin: 18px 0; }
+.memory-diff > div { min-width: 0; padding: 14px; border: 1px solid var(--color-border); background: var(--color-surface-alt); border-radius: 8px; }
+.memory-revision { display: flex; align-items: center; justify-content: space-between; gap: 14px; flex-wrap: wrap; padding: 12px 0; border-top: 1px solid var(--color-border); font-size: 14px; }
+.memory-history-dialog { width: min(760px, calc(100vw - 32px)); }
+.memory-clear-checkbox { display: flex !important; flex-direction: row !important; align-items: flex-start; margin: 20px 0; font-size: 14px; gap: 10px; }
+.memory-clear-checkbox input { width: 18px; min-height: 18px; margin-top: 3px; }
+@media (max-width: 600px) { .memory-diff { grid-template-columns: minmax(0,1fr); } }

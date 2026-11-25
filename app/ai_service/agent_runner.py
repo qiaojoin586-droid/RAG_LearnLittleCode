@@ -10,6 +10,7 @@ Agent 运行器
 - 超时保护
 """
 
+from contextlib import aclosing
 from typing import AsyncGenerator, Dict, Any, List, Optional
 
 from langchain_core.messages import HumanMessage
@@ -125,6 +126,11 @@ async def execute_agent(
         ppt_service=ppt_service,
         groups=tool_groups,
     )
+    if any(tool.name == 'send_email' for tool in tools):
+        system_prompt += (
+            '\n\n服务端邮件流程：send_email 只登记待确认申请。资料齐全时提交申请并提示用户在「待确认操作」核对。'
+            '发送决定由页面确认提交，聊天中的文字不能代替该操作。根据实际回执说明邮件受理或待核对状态。'
+        )
 
     # 3. 创建 Agent
     agent, max_iter = AgentFactory.create_agent(
@@ -135,7 +141,8 @@ async def execute_agent(
     )
 
     # 4. 构造 Agent 输入（messages 格式，支持多模态 content blocks）
-    messages = list(compressed_messages or [])
+    from app.ai_service.context_composer import compose_history
+    messages = compose_history(list(compressed_messages or []))
     if attachment_content:
         # 多模态：文本 + 图片/视频帧 blocks（OpenAI 兼容格式）
         content = [{"type": "text", "text": user_message}]
@@ -150,11 +157,12 @@ async def execute_agent(
     # 每次迭代约 2-3 步，乘以 3 留出安全余量
     recursion_limit = max_iter * 3
     max_consecutive_tool_calls = agent_config.get("max_consecutive_tool_calls", 6)
-    async for event in run_agent_stream(
+    async with aclosing(run_agent_stream(
         agent=agent,
         agent_input=agent_input,
         config={"recursion_limit": recursion_limit},
         timeout=timeout,
         max_consecutive_tool_calls=max_consecutive_tool_calls,
-    ):
-        yield event
+    )) as _owned_stream_0:
+        async for event in _owned_stream_0:
+            yield event
