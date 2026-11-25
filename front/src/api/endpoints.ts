@@ -88,7 +88,17 @@ export const endpoints = {
 
   // ========== 聊天 ==========
   chat: {
+    citation: (session: string, message: number, id: string) =>
+      `${API_PREFIX}/chat/${encodeURIComponent(session)}/messages/${message}/citations/${encodeURIComponent(id)}`,
     query: `${API_PREFIX}/chat/query`,
+    workflowEvents: (workflowId: string, after: number) =>
+      `${API_PREFIX}/chat/workflows/${encodeURIComponent(workflowId)}/events?after=${after}`,
+    cancelWorkflow: (workflowId: string) =>
+      `${API_PREFIX}/chat/workflows/${encodeURIComponent(workflowId)}/cancel`,
+    approvals: (sessionId: string) => `${API_PREFIX}/chat/sessions/${encodeURIComponent(sessionId)}/approvals`,
+    decideApproval: (operationId: string) => `${API_PREFIX}/chat/approvals/${encodeURIComponent(operationId)}`,
+    emailOperations: (sessionId: string) => `${API_PREFIX}/chat/sessions/${encodeURIComponent(sessionId)}/email-operations`,
+    emailReceived: (operationId: string) => `${API_PREFIX}/chat/approvals/${encodeURIComponent(operationId)}/email-received`,
     rag: `${API_PREFIX}/chat/rag`,
     sessions: `${API_PREFIX}/chat/sessions`,
     /** DELETE 删除会话 */
@@ -106,6 +116,8 @@ export const endpoints = {
   // ========== 知识库 ==========
   knowledge: {
     upload: `${API_PREFIX}/knowledge/upload`,
+    uploadJobs: `${API_PREFIX}/knowledge/upload-jobs`,
+    uploadJob: (jobId: string) => `${API_PREFIX}/knowledge/upload-jobs/${jobId}`,
     documents: `${API_PREFIX}/knowledge/documents`,
     /** GET/DELETE 文档详情 */
     documentDetail: (docId: number) => `${API_PREFIX}/knowledge/documents/${docId}`,
@@ -116,7 +128,14 @@ export const endpoints = {
     today: `${API_PREFIX}/review/today`,
     /** POST 标记回顾完成 */
     complete: (reviewId: number) => `${API_PREFIX}/review/${reviewId}/complete`,
+    /** POST AI 生成回顾问题 */
+    questions: (reviewId: number) => `${API_PREFIX}/review/${reviewId}/questions`,
     stats: `${API_PREFIX}/review/stats`,
+  },
+
+  // ========== 用量与费用 ==========
+  usage: {
+    summary: `${API_PREFIX}/usage/summary`,
   },
 
   // ========== 模板 ==========

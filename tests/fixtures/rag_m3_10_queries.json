@@ -1,0 +1,22 @@
+{
+  "question": "冷却泵的安装步骤和维护方法有哪些？",
+  "rewrites": ["冷却泵的安装流程", "冷却泵的维护方式"],
+  "constraints": [
+    ["same_constraints", "如何配置 AX-900 并进行连接测试，不升级 firmware_v2，日期为 2026-11-01 至 2026-11-30，延迟≤5ms？", "怎样设置 AX-900 并进行连通性测试，不升级 firmware_v2，日期为 2026-11-01 至 2026-11-30，延迟≤5ms？", true],
+    ["wrong_model", "配置 AX-900 并排查故障", "设置 AX-9000 并诊断故障", false],
+    ["opaque_id_case", "配置 AX-900 并排查故障", "配置 ax-900 并排查故障", false],
+    ["quoted_name", "比较“配置中心”和“服务列表”", "对比“设置中心”和“服务列表”", false],
+    ["negation_dropped", "配置 A 并且不升级 B", "设置 A 并且升级 B", false],
+    ["negation_moved", "不要升级 A 并配置 B", "升级 A 并不要设置 B", false],
+    ["date_end", "比较 2026-10-01 至 2026-11-30 的结果", "对比 2026-10-01 至 2026-11-29 的结果", false],
+    ["time_direction", "比较发布之前和之后的结果", "对比发布之后和之前的结果", false],
+    ["unit_case", "比较 A 和 B 的响应时间≤5ms", "对比 A 和 B 的响应时间≤5mS", false],
+    ["operator", "比较 A 和 B 的温度≤5°C", "对比 A 和 B 的温度<5°C", false],
+    ["added_constraint", "比较 A 和 B", "对比 A 和 B 在五天内的结果", false],
+    ["conditional_subject", "不要考虑冷却泵的优点和缺点", "不要考虑冷却泵的优点", false],
+    ["assigned_constraints", "冷却泵的优点和缺点有哪些，不考虑价格？", "冷却泵的优势", false],
+    ["english_alias", "compare AX-900 and AX-901", "contrast AX-900 and AX-901", true],
+    ["aspect_subject", "冷却泵的安装步骤和维护方法有哪些？", "冷却泵的维护方式", true],
+    ["different_subject", "冷却泵的安装步骤和维护方法有哪些？", "电机的维护方式", false]
+  ]
+}

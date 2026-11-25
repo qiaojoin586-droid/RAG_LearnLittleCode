@@ -12,16 +12,18 @@
 
 import { useRef, useCallback } from 'react';
 import type { KnowledgeSSEMessage, ToolFileInfo } from '../types/api';
-import { dispatchSSEEvents, SSEParser, type SSEDispatchCallbacks } from '../utils/sseParser';
+import { runChatStream } from '../utils/chatStream';
+import type { SSEDispatchCallbacks } from '../utils/sseParser';
 
 /** SSE 回调配置 */
 interface SSECallbacks {
   /** 思考过程事件（RAG 管线各阶段） */
   onThinking?: (stage: string, content: string, details?: Record<string, unknown>) => void;
   /** 回答内容 chunk */
-  onResponse?: (content: string, sessionId?: string) => void;
+  onResponse?: (content: string, sessionId?: string, replace?: boolean) => void;
   /** 完成事件 */
   onDone?: (sessionId?: string) => void;
+  onCitations?: SSEDispatchCallbacks['onCitations'];
   /** 错误事件 */
   onError?: (message: string) => void;
   /** 知识库进度事件 */
@@ -66,48 +68,9 @@ export function useSSE() {
     const token = localStorage.getItem('jwt_token');
 
     try {
-      const response = await fetch(url, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          ...(token ? { Authorization: `Bearer ${token}` } : {}),
-        },
-        body: JSON.stringify(body),
-        signal: controller.signal,
-      });
-
-      if (!response.ok) {
-        callbacks.onError?.(`请求失败: ${response.status}`);
-        return;
-      }
-
-      const reader = response.body?.getReader();
-      if (!reader) {
-        callbacks.onError?.('无法读取响应流');
-        return;
-      }
-
-      const decoder = new TextDecoder();
-      const parser = new SSEParser();
-
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-
-        parser.feed(decoder.decode(value, { stream: true }));
-        dispatchEvents(parser.takeEvents(), callbacks);
-      }
-
-      // 流结束：处理残留的最后一行
-      parser.flush();
-      dispatchEvents(parser.takeEvents(), callbacks);
-
-    } catch (err: unknown) {
-      if (err instanceof Error && err.name === 'AbortError') {
-        // 用户主动取消，不报错
-        return;
-      }
-      callbacks.onError?.(err instanceof Error ? err.message : '连接失败');
+      await runChatStream(url, body, callbacks as SSEDispatchCallbacks, controller.signal, token);
+    } finally {
+      if (abortRef.current === controller) abortRef.current = null;
     }
   }, []);
 
@@ -120,15 +83,4 @@ export function useSSE() {
   }, []);
 
   return { start, stop };
-}
-
-/**
- * 分发 SSE 事件到业务回调（模块级包装，收敛类型断言）
- *
- * 运行时 dispatchSSEEvents 已按 event_type/type 字段分流：知识库回调只会收到
- * 带 event_type 的载荷（运行时即 KnowledgeSSEMessage），此处按实际载荷断言
- * （审查 P1-2：SSE 事件细化为 discriminated union 属后续优化项）
- */
-function dispatchEvents(events: Parameters<typeof dispatchSSEEvents>[0], callbacks: unknown): void {
-  dispatchSSEEvents(events, callbacks as SSEDispatchCallbacks);
 }

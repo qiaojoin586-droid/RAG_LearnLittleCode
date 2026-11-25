@@ -40,6 +40,7 @@ bcrypt>=4.0.0,<5.0.0
 pymupdf>=1.25.0
 # Markdown → HTML 转换（邮件 PDF 渲染用：表格/嵌套列表/围栏代码块）
 markdown>=3.5.0
+markdown-it-py==4.2.0
 pillow>=11.0.0
 # 注：python-magic-bin 已移除——项目代码零引用（magic bytes 校验为自研 _match_magic），
 # 且该包仅有 Windows wheel，导致 Linux CI 安装 requirements.lock 失败（2026-08-09）
@@ -66,6 +67,10 @@ httpx>=0.28.0
 aiofiles>=24.1.0
 pydantic>=2.11.0
 pydantic-settings>=2.9.0
+jsonschema>=4.26.0
+cryptography>=49.0.0
+rfc8785==0.1.4
+httpcore==1.0.9
 
 # ========== Model Trace（P2-5 trace 服务化） ==========
 langfuse>=4.0.0

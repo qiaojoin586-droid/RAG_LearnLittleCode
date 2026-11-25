@@ -23,6 +23,9 @@ class QueryRequest(BaseModel):
     message: str = Field("", max_length=10000, description="用户消息（可空，仅发附件时）")
     idempotency_key: Optional[str] = Field(None, description="幂等键（防重复提交）")
     enable_thinking: bool = Field(False, description="是否开启深度思考（思考模式，质量更高但响应更慢）")
+    continue_on_disconnect: bool = Field(False, description="允许对话在原连接断开后继续")
+    allow_background_actions: bool = Field(False, description="允许后台创建待确认操作并生成文件")
+    memory_mode: Literal['auto','off'] = Field('auto',description='off 时本轮不读取/创建个人记忆，也不触发提取')
     attachment_ids: List[str] = Field(default_factory=list, max_length=8, description="附件 ID 列表（图片 ≤6 张 + 视频 ≤1 个）")
 
     @model_validator(mode="after")
@@ -36,8 +39,14 @@ class QueryRequest(BaseModel):
 class RAGRequest(BaseModel):
     """RAG 查询请求"""
     query: str = Field(..., min_length=1, description="查询内容")
-    top_k: int = Field(3, ge=1, le=10, description="检索文档数量")
-    use_hyde: bool = Field(True, description="是否使用 HyDE 技术")
+    top_k: int = Field(3, ge=1, le=10, description="请求的证据数量，服务端最多返回 5 条")
+    use_hyde: bool = Field(False, description="是否额外检索 HyDE 假设回答")
+
+
+class ApprovalDecision(BaseModel):
+    decision: Literal['approve', 'reject']
+    preview_hash: str = Field(pattern=r'^[0-9a-f]{64}$')
+    model_config = {'extra': 'forbid'}
 
 
 class AttachmentMeta(BaseModel):
@@ -90,6 +99,7 @@ class ChatMessageResponse(BaseModel):
     token_count: Optional[int] = 0
     created_at: datetime
     attachments: Optional[List[AttachmentMeta]] = None
+    citation_ids: list[str] = Field(default_factory=list)
 
     model_config = {"from_attributes": True}
 

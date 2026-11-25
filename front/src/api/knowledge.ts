@@ -8,13 +8,13 @@
 
 import client from './client';
 import { endpoints } from './endpoints';
-import type { ApiResponse, KnowledgeDocument, KnowledgeDocumentListResponse } from '../types/api';
+import type { ApiResponse, KnowledgeDocument, KnowledgeDocumentListResponse, KnowledgeUploadJob, KnowledgeUploadJobList } from '../types/api';
 
 export const knowledgeApi = {
   /**
    * 上传知识库文档（SSE 流式进度推送）
    * 
-   * 使用原生 fetch 发送 FormData，返回 ReadableStream 供 useSSE Hook 消费。
+   * 使用原生 fetch 发送 FormData。响应提供任务编号和 SSE 事件流。
    * 
    * @param file - 要上传的文件
    * @param signal - AbortSignal 用于取消
@@ -41,9 +41,15 @@ export const knowledgeApi = {
     return response;
   },
 
+  getUploadJob: (jobId: string, signal?: AbortSignal) =>
+    client.get<ApiResponse<KnowledgeUploadJob>>(endpoints.knowledge.uploadJob(jobId), { signal }),
+
+  listUploadJobs: (after: string | undefined, signal: AbortSignal) =>
+    client.get<ApiResponse<KnowledgeUploadJobList>>(endpoints.knowledge.uploadJobs, { params: { after }, signal }),
+
   /** 获取文档列表 */
-  listDocuments: () =>
-    client.get<ApiResponse<KnowledgeDocumentListResponse>>(endpoints.knowledge.documents),
+  listDocuments: (signal?: AbortSignal) =>
+    client.get<ApiResponse<KnowledgeDocumentListResponse>>(endpoints.knowledge.documents, { signal }),
 
   /** 获取文档详情 */
   getDocument: (docId: number) =>

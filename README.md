@@ -4,6 +4,9 @@
 
 **AI 驱动的个人知识管理助手 —— 让笔记拥有记忆，让对话理解一切**
 
+![GitHub stars](https://img.shields.io/github/stars/qiaojoin586-droid/RAG_LearnLittleCode?style=social)
+![GitHub forks](https://img.shields.io/github/forks/qiaojoin586-droid/RAG_LearnLittleCode?style=social)
+
 `RAG` `Agent` `多模态` `FastAPI` `LangGraph` `React`
 
 ![Python](https://img.shields.io/badge/Python-3.10%2B-3776AB?logo=python&logoColor=white)
@@ -63,14 +66,14 @@
 | 🗣️ **语音合成** | Edge TTS 朗读（MP3，按用户目录隔离），对话中直接"朗读 / 读给我听"触发 |
 | 📊 **PPT 生成** | 关键词触发的讲解 PPT 生成（python-pptx 本地渲染，无额外额度）+ PPT 模板管理 +可切换Aspose.Slides Cloud API|
 | 🌍 **外部 API 工具** | DeepL 高质量翻译 · Wolfram Alpha 精确计算 / 解方程 / 单位换算 |
-| 📓 **笔记系统** | Markdown 编辑器（双栏编辑预览 + 语法工具栏）+ **MD / TXT 文档类型**（新建可选，仅新建时可定）+ 笔记模板 + AI 自动补全 / 打标签 |
+| 📓 **笔记系统** | Markdown 编辑器（双栏编辑预览 + 语法工具栏）+ **MD / TXT 文档类型**（新建可选，仅新建时可定）+ 笔记模板 + **AI 光标处内联补全（Tab 采纳）** + **AI 自动打标签（保存后后台生成）** + **AI 写作辅助（续写 / 扩写 / 摘要）** |
 | 🗂️ **分类管理** | 动态分类树（最多 3 级）：拖拽排序 / 移动 / 合并 / 软删除与回收站恢复（级联恢复祖先链），笔记按分类精确过滤 |
 | 🔍 **全局搜索** | 顶栏 Cmd/Ctrl+K 跨笔记 / 会话 / 知识库检索；笔记走 **MySQL 关键词搜索（FULLTEXT ngram 索引 + LIKE 兜底）**，零外部依赖 |
 | 💬 **对话卡片化** | AI 回复中的笔记搜索列表与用户引用的笔记均渲染为可点击卡片（悬浮反馈 + 全文预览弹窗） |
 | 🗑️ **回收站** | 笔记 / 分类双 Tab 回收站，14 天自动彻底清除（定时任务），单条与批量恢复 / 彻底删除 |
 | ✉️ **邮件功能** | QQ 邮箱注册验证，笔记以 Markdown / PDF 导出发送 |
 | 🗜️ **记忆压缩** | 滑动窗口 + 里程碑摘要 + Redis 热缓存的三级对话记忆管理，长对话不丢上下文 |
-| 💰 **Token 用量追踪** | model_trace 输出总线（log / db / langfuse），成本账单 API（前端用量面板开发中） |
+| 💰 **Token 用量追踪** | model_trace 输出总线（log / db / langfuse）+ **前端「用量」面板**（调用数 / Token / 费用 / 平均延迟，按模型与阶段明细，支持今日 / 近 7 天 / 近 30 天） |
 | 🌐 **前端体验** | React 19 + Vite + Tailwind，i18n 国际化，暗 / 亮主题；**三栏式布局**（TopBar + 图标导航 + 分类树 / 列表 / 详情同屏）+ **AI 对话浮层**（480px 右侧滑入，唯一对话入口） |
 | ✅ **黄金评测器** | tests/eval 自动化评测 AI 对话质量（含安全用例） |
 
@@ -231,10 +234,17 @@ docker compose up -d --build
   .venv/Scripts/python.exe -m alembic revision --autogenerate -m "描述"
   .venv/Scripts/python.exe -m alembic upgrade head
   ```
-- **重排序模型**：容器内需可访问本地模型缓存（默认 `HF_HUB_OFFLINE=1`）。把本机 `~/.cache/huggingface` 拷到 `./huggingface_cache/`（或设置 `HF_CACHE_DIR`），或在构建时 `docker build --build-arg PRELOAD_MODELS=true .`
-- **端口**：`8000` 仅为本机调试暴露，外部流量统一走前端 nginx（80）
+- **重排序模型**：容器内需可访问本地模型缓存（默认 `HF_HUB_OFFLINE=1`）。把本机 `~/.cache/huggingface` 拷到 `./huggingface_cache/`（或设置 `HF_CACHE_DIR`），或在构建时 `docker build --build-arg PRELOAD_MODELS=true .`。缓存挂载到容器 `HF_HOME=/opt/hf-cache`（容器以非 root 运行，不能放在 `/root/.cache`）
+- **前端 nginx 模式**：默认 `front/nginx.conf`（强制 HTTPS，需 `./certs` 证书）。无域名/无证书阶段在 `.env` 设 `NGINX_CONF=nginx.http.conf` 改用纯 HTTP 配置，无需手改文件
+- **端口**：`8000` 仅绑定宿主机 `127.0.0.1`（本机调试用），外部流量统一走前端 nginx（80/443）
+- **目录权限**：容器入口脚本 `scripts/docker-entrypoint.sh` 每次启动自动修正 `data`/`logs`/`media` 属主后降权为 appuser 运行，宿主机无需手工 `chown`
+- **国内构建加速**：在 `.env` 设置 `PIP_INDEX_URL` / `NPM_REGISTRY`（见 `.env.example` 的「Docker 部署」段）
+- **容器日志**：已配置轮转（单文件 10MB × 3），避免小磁盘服务器被日志写满
 - **单进程部署**：多 worker/多实例前需先完成 Redis 化限流、scheduler 去重与 ChromaDB 多进程写冲突改造（见已知限制）
 - **监控**：`/metrics` 暴露 Prometheus 指标（HTTP 计数/耗时）；`/ready` 就绪探针检查后台初始化 + MySQL/Redis 连通性
+
+> 服务器（宝塔 Linux / 2核2G / 无域名）完整部署步骤见 [`docs/宝塔Linux服务器Docker部署方案.md`](docs/宝塔Linux服务器Docker部署方案.md)。
+
 
 ---
 
@@ -253,7 +263,7 @@ docker compose up -d --build
 | 笔记 | `GET /note/recycle-bin` · `POST /note/{id}/restore` · `DELETE /note/{id}/permanent` | 回收站 |
 | 笔记 | `POST /note/search` · `POST /note/autocomplete` · `POST /note/write-assistant` | 语义搜索 / AI 补全 / 写作辅助 |
 | 知识库 | `POST /knowledge/upload`（SSE 进度）· `GET /knowledge/documents` | 文档上传与管理 |
-| 回顾 | `GET /review/today` · `POST /review/{id}/complete` · `GET /review/stats` | 艾宾浩斯回顾 |
+| 回顾 | `GET /review/today` · `POST /review/{id}/complete` · `POST /review/{id}/questions` · `GET /review/stats` | 艾宾浩斯回顾 + **AI 出题（LLM，6h 缓存）** |
 | 模板 | `GET/POST /note-template` · `PUT/DELETE /note-template/{id}` | 笔记模板 |
 | PPT | `GET /ppt/{file_id}` · `POST /ppt-template/upload` · `GET/DELETE /ppt-template` | 下载生成的 PPT / PPT 模板管理 |
 | TTS | `GET /tts/{file_id}` | 下载 TTS 生成的 MP3 音频 |

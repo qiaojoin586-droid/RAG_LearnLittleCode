@@ -71,8 +71,9 @@ export class SSEParser {
 /** SSE 回调配置（与 useSSE 对齐，供纯函数分发使用） */
 export interface SSEDispatchCallbacks {
   onThinking?: (stage: string, content: string, details?: Record<string, unknown>) => void;
-  onResponse?: (content: string, sessionId?: string) => void;
+  onResponse?: (content: string, sessionId?: string, replace?: boolean) => void;
   onDone?: (sessionId?: string) => void;
+  onCitations?: (sessionId: string, messageId: number, ids: string[]) => void;
   onError?: (message: string) => void;
   onKnowledgeProgress?: (data: SSEEvent) => void;
   onPlanStart?: (goal: string, totalSteps: number) => void;
@@ -120,6 +121,14 @@ export function dispatchSSEEvents(events: SSEEvent[], callbacks: SSEDispatchCall
         }
         break;
       case 'done':
+        if (typeof data.replay_content === 'string') {
+          callbacks.onResponse?.(data.replay_content, data.session_id ? String(data.session_id) : undefined, true);
+        }
+        if (typeof data.session_id === 'string' && typeof data.reply_message_id === 'number'
+            && Number.isSafeInteger(data.reply_message_id) && Array.isArray(data.citation_ids)) {
+          const ids = data.citation_ids.filter((id): id is string => typeof id === 'string' && /^E[1-9]\d?$/.test(id));
+          if (ids.length) callbacks.onCitations?.(data.session_id, data.reply_message_id, [...new Set(ids)]);
+        }
         callbacks.onDone?.(data.session_id ? String(data.session_id) : undefined);
         break;
       case 'error':

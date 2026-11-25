@@ -12,6 +12,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.logger_handler import logger
 from app.core.success_response import success_response
+from app.core.rate_limit import rate_limit
+from app.core.model_trace import clear_trace_context, new_request_id, set_trace_context
 from app.db.database import get_db
 from app.utils.auth_utils import get_current_user_id
 from app.services.review_service import ReviewService
@@ -53,6 +55,27 @@ async def mark_reviewed(
         "next_review_at": review.next_review_at.isoformat(),
         "interval_days": review.interval_days,
     })
+
+
+@router.post("/review/{review_id}/questions", summary="AI 生成回顾问题")
+async def generate_review_questions(
+    review_id: int,
+    user_id: str = Depends(get_current_user_id),      # ★ 必须排在 rate_limit 之前
+    _rl=Depends(rate_limit(endpoint_limit=10)),       # ★ 参数顺序写法（C1）
+    db: AsyncSession = Depends(get_db),
+):
+    """为回顾笔记生成 2-3 道复习题（LLM；同一笔记内容 6 小时内复用缓存）"""
+    from main import init_manager
+
+    # note 类端点无 trace 上下文（F17）→ 显式设置，保证费用按用户归属
+    set_trace_context(new_request_id(), user_id=user_id, stage="review_question")
+    try:
+        data = await review_service.generate_questions(
+            db, review_id, user_id, chat_model=init_manager.chat_model,
+        )
+    finally:
+        clear_trace_context()
+    return success_response(data=data)
 
 
 @router.get("/review/stats", summary="回顾统计")

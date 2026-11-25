@@ -18,14 +18,16 @@
 
 from typing import Optional
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, Query, Response
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.failed_response import BusinessError, ErrorCode
 from app.core.success_response import success_response
 from app.core.rate_limit import rate_limit
+from app.core.model_trace import clear_trace_context, new_request_id, set_trace_context
 from app.db.database import get_db
 from app.db.redis_client import get_redis
+from app.rag.source_access import note_source
 from app.schemas.note import (
     NoteCreate, NoteUpdate, NoteResponse, NoteListResponse,
     NoteSearchRequest, NoteSearchResponse, BatchOperation,
@@ -33,6 +35,7 @@ from app.schemas.note import (
     DeletedNoteListResponse, DeletedNoteResponse,
 )
 from app.utils.auth_utils import get_current_user_id
+from app.utils.time_utils import utc_now
 router = APIRouter()
 
 
@@ -95,10 +98,8 @@ async def list_recycle_bin(
     db: AsyncSession = Depends(get_db),
 ):
     """分页获取回收站中的已删除笔记（按删除时间倒序，附带剩余清理天数）"""
-    from datetime import datetime as dt
-
     notes, total = await _get_note_service().list_deleted_notes(db, user_id, page, page_size)
-    now = dt.now()
+    now = utc_now()
 
     items = []
     for n in notes:
@@ -124,6 +125,19 @@ async def get_note(
     return success_response(data=NoteResponse.model_validate(note).model_dump())
 
 
+@router.get("/note/{note_id}/index-source", summary="读取已授权的笔记索引版本")
+async def get_note_index_source(
+    note_id: str, response: Response,
+    version: str = Query(pattern=r'^[0-9a-f]{64}$'),
+    user_id: str = Depends(get_current_user_id), db: AsyncSession = Depends(get_db),
+    ordinal: int | None = None,
+):
+    response.headers['Cache-Control'] = 'private, no-store'
+    note, locator = await note_source(db, user_id, note_id, version, ordinal)
+    content = (note.content or note.title)[locator['char_start']:locator['char_end']]
+    return success_response(data={'source_locator': locator, 'content': content})
+
+
 @router.put("/note/{note_id}", summary="更新笔记")
 async def update_note(
     note_id: str,
@@ -131,7 +145,7 @@ async def update_note(
     user_id: str = Depends(get_current_user_id),
     db: AsyncSession = Depends(get_db),
 ):
-    """更新笔记内容，同步更新向量"""
+    """更新笔记内容并提交索引任务。"""
     note = await _get_note_service().update_note(db, note_id, user_id, data)
     # 显式 commit（写操作统一约定，见 move_note_to_category 注释）
     await db.commit()
@@ -175,7 +189,7 @@ async def restore_note(
     user_id: str = Depends(get_current_user_id),
     db: AsyncSession = Depends(get_db),
 ):
-    """从回收站恢复笔记（清除 deleted_at + 重建 ChromaDB 向量）"""
+    """从回收站恢复笔记并提交索引重建任务。"""
     await _get_note_service().restore_note(db, note_id, user_id)
     # 显式 commit：前端恢复成功后立即重拉回收站列表，
     # 避免 auto-commit 落库晚于刷新请求（条目"恢复后仍在"的竞态）
@@ -256,25 +270,24 @@ async def batch_operation(
 
     for note_id in data.note_ids:
         try:
-            if data.operation == 'delete':
-                await note_service.delete_note(db, note_id, user_id)
-            elif data.operation == 'pin':
-                await note_service.pin_note(db, note_id, user_id)
-            elif data.operation == 'unpin':
-                await note_service.unpin_note(db, note_id, user_id)
-            elif data.operation == 'move':
-                if data.target_category_id:
-                    # 新逻辑：按 category_id 移动，同步写入 category 字符串
-                    await note_service.move_note_by_id(db, note_id, user_id, data.target_category_id)
+            async with db.begin_nested():
+                if data.operation == 'delete':
+                    await note_service.delete_note(db, note_id, user_id)
+                elif data.operation == 'pin':
+                    await note_service.pin_note(db, note_id, user_id)
+                elif data.operation == 'unpin':
+                    await note_service.unpin_note(db, note_id, user_id)
+                elif data.operation == 'move':
+                    if data.target_category_id:
+                        await note_service.move_note_by_id(db, note_id, user_id, data.target_category_id)
+                    else:
+                        await note_service.move_note(db, note_id, user_id, data.target_category)
+                elif data.operation == 'permanent_delete':
+                    await note_service.permanent_delete(db, note_id, user_id)
+                elif data.operation == 'restore':
+                    await note_service.restore_note(db, note_id, user_id)
                 else:
-                    # 旧逻辑：按字符串移动（向后兼容）
-                    await note_service.move_note(db, note_id, user_id, data.target_category)
-            elif data.operation == 'permanent_delete':
-                await note_service.permanent_delete(db, note_id, user_id)
-            elif data.operation == 'restore':
-                await note_service.restore_note(db, note_id, user_id)
-            else:
-                raise ValueError(f"未知的操作类型: {data.operation}")
+                    raise ValueError(f"未知的操作类型: {data.operation}")
             success_ids.append(note_id)
         except Exception as e:
             errors.append({"note_id": note_id, "error": str(e)})
@@ -310,18 +323,41 @@ async def batch_operation(
 @router.post("/note/autocomplete", summary="AI 内联补全")
 async def autocomplete(
     data: AutocompleteRequest,
-    user_id: str = Depends(get_current_user_id),
+    user_id: str = Depends(get_current_user_id),      # ★ C1：必须排在 rate_limit 之前
+    _rl=Depends(rate_limit(endpoint_limit=10)),       # ★ C1：参数顺序写法，限流才能读到 user_id
 ):
     """AI 内联补全（根据上下文续写）"""
-    # TODO: 集成 LLM 补全
-    return success_response(data={"completion": "AI 补全功能待集成"})
+    # ★ 修复（评审 F17）：note 类端点此前从不设置 trace 上下文，而
+    # set_trace_stage 在无上下文时是空操作 → model_traces.user_id 落为空串、
+    # stage 落为默认 "chat"，导致按用户聚合的用量/费用看不到补全调用。
+    # 必须先 set_trace_context 再调用模型。
+    set_trace_context(new_request_id(), user_id=user_id, stage="autocomplete")
+    try:
+        result = await _get_note_service().ai_autocomplete(
+            content=data.content,
+            cursor_position=data.cursor_position,
+            title=data.title or "",
+        )
+    finally:
+        clear_trace_context()
+    return success_response(data=result)
 
 
 @router.post("/note/write-assistant", summary="AI 写作辅助")
 async def write_assistant(
     data: WriteAssistantRequest,
-    user_id: str = Depends(get_current_user_id),
+    user_id: str = Depends(get_current_user_id),      # ★ 必须排在 rate_limit 之前
+    _rl=Depends(rate_limit(endpoint_limit=10)),       # ★ 参数顺序写法（C1）
 ):
-    """AI 写作辅助（续写/扩写/摘要）"""
-    # TODO: 集成 LLM 写作辅助
-    return success_response(data={"result": "AI 写作辅助功能待集成"})
+    """AI 写作辅助（续写 / 扩写 / 摘要）"""
+    # 与补全一致：note 端点需显式建 trace 上下文，否则费用归不到用户名下（F17）
+    set_trace_context(new_request_id(), user_id=user_id, stage="write_assistant")
+    try:
+        result = await _get_note_service().ai_write_assist(
+            content=data.content,
+            mode=data.mode,
+            title=data.title or "",
+        )
+    finally:
+        clear_trace_context()
+    return success_response(data=result)

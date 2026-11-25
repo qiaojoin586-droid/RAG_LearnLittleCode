@@ -1,0 +1,68 @@
+/**
+ * GhostTextArea 样式：透明 textarea + 底层 highlighter 覆盖层
+ *
+ * 设计文档：docs/AI联机补全功能设计优化方案.md §4.3.1
+ *
+ * 关键约束：
+ * - 两层必须共用 .gta-typography（排版属性单一来源），任何一项不一致都会导致换行漂移
+ * - font-family 绝不能写进 .gta-typography（F1：否则 txt 模式也会被改成等宽）
+ * - 上层 textarea 的选区必须半透明，否则会盖住底层文字
+ * - 滚动条占位必须一致（scrollbar-gutter），否则出现滚动条后换行位置漂移
+ */
+
+.gta-typography {
+  /* 与 NoteEditor 原 textarea 的 p-4 text-sm leading-relaxed 对齐 */
+  padding: 1rem;
+  font-size: 0.875rem;
+  line-height: 1.625;
+  letter-spacing: normal;
+  tab-size: 4;
+  white-space: pre-wrap;
+  overflow-wrap: break-word;
+  word-break: normal;
+  border: 0;
+  box-sizing: border-box;
+  scrollbar-gutter: stable;
+  /* ⚠️ F10：scrollbar-gutter 需 Chrome 94+ / Firefox 97+ / Safari 18.2+。
+     更低版本 Safari 下两层可能因滚动条占位不同而轻微错位（可接受降级）。 */
+}
+
+/* 等宽字体修饰类：md 模式两层同时加，txt 模式两层都不加 */
+.gta-mono { font-family: var(--font-mono); }
+
+.gta-textarea {
+  color: transparent;
+  caret-color: var(--color-text);
+  -webkit-text-fill-color: transparent;   /* Safari */
+  background: transparent;
+  resize: none;
+  outline: none;
+  position: absolute;
+  inset: 0;
+  overflow-y: auto;
+}
+
+/* 上层选区必须半透明，让底层文字透出 */
+.gta-textarea::selection { background: rgba(59, 130, 246, 0.3); }
+
+.gta-highlighter {
+  position: absolute;
+  inset: 0;
+  overflow: hidden;              /* 滚动由 textarea 驱动，见 onScroll */
+  pointer-events: none;
+  user-select: none;
+  color: var(--color-text);
+}
+
+/* 内联补全建议：灰色 */
+.gta-ghost {
+  color: var(--color-text-tertiary);
+  opacity: 0.65;
+}
+
+/* IME 组合期间：textarea 恢复可见，highlighter 隐藏（否则拼音预编辑串会一起透明） */
+.gta-composing .gta-textarea {
+  color: var(--color-text);
+  -webkit-text-fill-color: var(--color-text);
+}
+.gta-composing .gta-highlighter { visibility: hidden; }

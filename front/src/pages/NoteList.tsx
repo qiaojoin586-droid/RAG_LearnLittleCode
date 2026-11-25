@@ -10,7 +10,7 @@
  * 新增：排序（客户端）/ 视图切换（卡片 ↔ 网格，决策 M1）/ MD-TXT 徽章 / 收藏星切换（is_pinned）。
  */
 
-import { useState, useEffect, useCallback, useMemo } from 'react';
+import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import { useNavigate, useParams, useLocation } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
 import { toast } from 'sonner';
@@ -76,6 +76,8 @@ export default function NoteList() {
   const [loading, setLoading] = useState(true);
   const [total, setTotal] = useState(0);
   const [page, setPage] = useState(1);
+  const listRequestRef = useRef(0);
+  const invalidateListRequests = useCallback(() => { ++listRequestRef.current; }, []);
 
   // 分类树选中态（Zustand：null = 所有笔记；__uncategorized__ = 未分类；其余为分类 ID）
   const selectedCategoryId = useCategoryStore((s) => s.selectedCategoryId);
@@ -182,6 +184,7 @@ export default function NoteList() {
   /** 加载笔记列表（reset=true 从第 1 页开始；按分类 ID 过滤，null = 不过滤） */
   const loadNotes = useCallback(
     async (reset = false, categoryId?: string | null) => {
+      const requestId = ++listRequestRef.current;
       const target = categoryId === undefined ? selectedCategoryId : categoryId;
       setLoading(true);
       try {
@@ -191,26 +194,28 @@ export default function NoteList() {
           page_size: 20,
           category_id: target ?? undefined,
         });
+        if (requestId !== listRequestRef.current) return;
         const data = res.data.data;
-        setNotes(reset ? data.notes : [...notes, ...data.notes]);
+        setNotes((prev) => reset ? data.notes : [...prev, ...data.notes]);
         setTotal(data.total);
-        if (!reset) setPage(p + 1);
+        setPage(p + 1);
       } catch {
         // 错误处理（与旧版一致：静默失败，列表保持原状）
       } finally {
-        setLoading(false);
+        if (requestId === listRequestRef.current) setLoading(false);
       }
     },
-    [selectedCategoryId, page, notes]
+    [selectedCategoryId, page]
   );
 
   // 分类树选择变化时重新加载（重置到第 1 页）。
-  // 注意：loadNotes 依赖 notes/page，加入依赖数组会导致"加载 → notes 变化 →
+  // 注意：loadNotes 依赖 page，加入依赖数组会导致"加载 → page 变化 →
   // loadNotes 身份变化 → effect 重跑"的循环，故仅以 selectedCategoryId 为依赖
   useEffect(() => {
     loadNotes(true, selectedCategoryId);
+    return invalidateListRequests;
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [selectedCategoryId]);
+  }, [selectedCategoryId, invalidateListRequests]);
 
   // 移动端：选中分类后自动收起分类树抽屉
   useEffect(() => {

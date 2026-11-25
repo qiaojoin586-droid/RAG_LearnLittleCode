@@ -1,0 +1,79 @@
+.model-config { color: var(--color-text); max-width: 1440px; padding: 28px; margin: auto; width: 100%; }
+.model-config h1 { display: flex; align-items: center; gap: 10px; font-size: 27px; font-weight: 700; margin: 3px 0 8px; }
+.model-config h2 { font-size: 20px; font-weight: 600; }
+.model-config h3 { font-size: 15px; font-weight: 600; }
+.model-config p { line-height: 1.65; }
+.mc-page-heading, .mc-role-heading, .mc-toolbar, .mc-actions { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
+.mc-page-heading { margin-bottom: 22px; }
+.mc-eyebrow { font-family: var(--font-mono); color: var(--color-text-secondary); font-size: 12px; letter-spacing: .07em; }
+.mc-muted, .model-config label > span { color: var(--color-text-secondary); font-size: 13px; line-height: 1.6; }
+.mc-badge { display: inline-flex; border: 1px solid var(--color-border); border-radius: 6px; padding: 4px 9px; color: var(--color-text-secondary); font-size: 12px; background: var(--color-surface-alt); }
+.mc-info, .mc-error, .mc-success { border-radius: var(--radius-md); padding: 14px 16px; margin: 14px 0; overflow-wrap: anywhere; }
+.mc-info { background: var(--color-accent-bg); border: 1px solid var(--color-border); }
+.mc-error { background: var(--color-danger-bg); color: var(--color-text); border: 1px solid var(--color-danger); }
+.mc-success { background: var(--color-success-bg); color: var(--color-success); }
+.model-config label, .mc-dialog label { display: flex; flex-direction: column; gap: 7px; font-size: 14px; font-weight: 500; min-width: 0; }
+.model-config input, .model-config select, .model-config textarea, .mc-dialog input { min-width: 0; width: 100%; border: 1px solid var(--color-border); border-radius: 7px; padding: 10px 12px; color: var(--color-text); background: var(--color-card); font: inherit; font-weight: 400; }
+.model-config input, .model-config select, .mc-dialog input { min-height: 44px; }
+.model-config textarea { resize: vertical; line-height: 1.7; }
+.model-config button, .mc-dialog button { min-height: 40px; display: inline-flex; align-items: center; justify-content: center; gap: 7px; padding: 9px 13px; border-radius: 7px; border: 1px solid var(--color-border); background: var(--color-card); color: var(--color-text); font-size: 14px; cursor: pointer; transition: background-color 150ms, border-color 150ms; }
+.model-config button:hover:not(:disabled), .mc-dialog button:hover:not(:disabled) { border-color: var(--color-accent); background: var(--color-accent-bg); }
+.model-config button:disabled, .model-config fieldset:disabled, .mc-dialog button:disabled { opacity: .6; cursor: not-allowed; }
+.model-config .mc-primary, .mc-dialog .mc-primary { background: var(--color-accent); color: var(--color-on-accent); border-color: var(--color-accent); }
+.model-config .mc-primary:hover:not(:disabled), .mc-dialog .mc-primary:hover:not(:disabled) { background: var(--color-accent-hover); }
+.model-config :is(button, input, select, textarea, summary):focus-visible, .mc-dialog :is(button, input):focus-visible { outline: 3px solid var(--color-accent); outline-offset: 3px; }
+.mc-toolbar { margin: 18px 0; }
+.mc-toolbar > label { flex: 1 1 220px; max-width: 400px; }
+.mc-workspace { display: grid; grid-template-columns: 210px minmax(0, 1fr); gap: 20px; margin-top: 22px; align-items: start; }
+.model-config .mc-mobile-role { display: none; }
+.mc-roles { background: var(--color-card); border: 1px solid var(--color-border); border-radius: var(--radius-md); padding: 10px; }
+.mc-roles h2 { font-size: 12px; color: var(--color-text-secondary); padding: 12px 10px 8px; }
+.mc-roles button { width: 100%; justify-content: space-between; border: none; text-align: left; margin: 2px 0; font-size: 13px; }
+.mc-roles button[aria-current=true] { color: var(--color-accent); background: var(--color-accent-bg); font-weight: 600; }
+.mc-editor { min-width: 0; padding: 24px; background: var(--color-card); border: 1px solid var(--color-border); border-radius: var(--radius-lg); }
+.mc-role-heading { margin-bottom: 20px; }
+.mc-stack, .mc-stack > fieldset { display: flex; flex-direction: column; gap: 18px; min-width: 0; }
+.mc-stack fieldset { border: none; padding: 0; margin: 0; }
+.mc-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 18px; }
+.mc-secret { display: flex; align-items: flex-start; gap: 12px; background: var(--color-surface-alt); border: 1px solid var(--color-border); padding: 16px; border-radius: var(--radius-md); }
+.mc-secret > div { flex: 1; min-width: 0; }
+.mc-secret > svg { flex-shrink: 0; margin-top: 4px; }
+.mc-secret p { margin-bottom: 10px; }
+.mc-secret .mc-muted { margin: 10px 0 0; }
+.model-config summary { cursor: pointer; font-size: 14px; font-weight: 600; padding: 10px 0; }
+.model-config details > .mc-grid, .model-config details > label { margin-top: 12px; }
+.mc-policy { border: 1px solid var(--color-border); background: var(--color-card); border-radius: var(--radius-md); padding: 8px 18px 14px; margin: 16px 0; }
+.mc-policy > p { margin: 0 0 16px; }
+.mc-binding, .mc-testing { margin-top: 24px; border-top: 1px solid var(--color-border); padding-top: 16px; }
+.mc-binding > p { margin-bottom: 16px; }
+.model-config .mc-checkbox { flex-direction: row; align-items: center; gap: 9px; font-size: 13px; font-weight: 400; }
+.model-config .mc-checkbox input { width: 18px; height: 18px; min-height: 18px; flex-shrink: 0; accent-color: var(--color-accent); }
+.mc-testing > label { margin: 14px 0; }
+.mc-test-result { background: var(--color-surface-alt); border-radius: var(--radius-md); padding: 14px; }
+.mc-test-result > p:first-child { display: flex; align-items: center; gap: 6px; margin-bottom: 8px; }
+.mc-test-result .mc-badge { margin: 0 6px 8px 0; }
+.mc-empty { display: flex; align-items: center; flex-direction: column; gap: 12px; padding: 70px 24px; color: var(--color-text-secondary); text-align: center; }
+.mc-overlay { position: fixed; inset: 0; background: rgb(0 0 0 / .5); z-index: 210; }
+.mc-dialog { position: fixed; z-index: 211; top: 50%; left: 50%; transform: translate(-50%, -50%); width: min(440px, calc(100vw - 32px)); max-height: calc(100dvh - 32px); overflow: auto; border-radius: var(--radius-lg); border: 1px solid var(--color-border); padding: 24px; background: var(--color-card); color: var(--color-text); box-shadow: var(--shadow-dialog); }
+.mc-dialog h2 { font-size: 20px; font-weight: 600; margin-bottom: 10px; }
+.mc-dialog p { color: var(--color-text-secondary); font-size: 14px; line-height: 1.7; margin-bottom: 20px; }
+.mc-dialog .mc-error { margin: 0; }
+.mc-dialog .mc-index-catch-up { min-height: 44px; }
+@media (max-width: 900px) { .model-config { padding: 20px; } .mc-workspace { grid-template-columns: minmax(0, 1fr); } .mc-roles { display: none; } .model-config .mc-mobile-role { display: flex; } }
+@media (max-width: 560px) { .model-config { padding: 16px; } .mc-grid { grid-template-columns: minmax(0, 1fr); } .mc-editor { padding: 16px; } .mc-actions { justify-content: flex-start; } .mc-toolbar { align-items: stretch; } .mc-toolbar > label { max-width: none; } }
+@media (prefers-reduced-motion: reduce) { .model-config *, .mc-dialog * { transition: none !important; } }
+.mc-merge-dialog { max-height: 85dvh; overflow-y: auto; }
+.mc-merge-dialog fieldset { margin-block: 1rem; min-width: 0; }
+.mc-merge-summary { overflow-wrap: anywhere; }
+.mc-merge-dialog .mc-merge-summary p { margin-bottom: .35rem; }
+.mc-merge-dialog input[type=radio] { width: 18px; height: 18px; accent-color: var(--color-accent); }
+.mc-merge-choice { display: block; margin-block: .75rem; cursor: pointer; }
+.mc-merge-choice > span { display: flex; align-items: center; gap: .5rem; min-height: 44px; }
+.mc-baseline-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 260px), 1fr)); gap: 12px; margin-block: 16px; }
+.mc-baseline-grid article { overflow-wrap: anywhere; }
+.mc-baseline-grid h3 { margin-bottom: 8px; }
+.mc-dialog > label { display: flex; flex-direction: column; gap: 8px; margin-block: 12px; }
+.mc-dialog > label > select { width: 100%; padding: 9px; border: 1px solid var(--color-border); border-radius: var(--radius-md); background: var(--color-card); color: var(--color-text); }
+.mc-dialog > .mc-checkbox { flex-direction: row; align-items: center; min-height: 44px; font-size: 14px; }
+.mc-dialog > .mc-checkbox input { width: 18px; height: 18px; flex-shrink: 0; accent-color: var(--color-accent); }
+.mc-dialog .mc-danger { color: var(--color-danger); border-color: var(--color-danger); background: var(--color-danger-bg); }

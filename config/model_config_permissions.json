@@ -1,0 +1,304 @@
+{
+  "schema_version": 1,
+  "scope": {
+    "type": "system",
+    "id": "system"
+  },
+  "roles": {
+    "config_reader": [
+      "config.read"
+    ],
+    "config_operator": [
+      "config.read",
+      "config.edit",
+      "config.test"
+    ],
+    "config_admin": [
+      "config.read",
+      "config.edit",
+      "config.test",
+      "config.publish",
+      "config.restore",
+      "config.audit.read",
+      "config.credential.revoke",
+      "endpoint.manage",
+      "grant.manage",
+      "config.outbox.manage"
+    ]
+  },
+  "routes": [
+    {
+      "method": "GET",
+      "path": "/api/v1/model-config",
+      "permission": "config.read",
+      "enabled": true,
+      "reauth": "none"
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/model-config/roles",
+      "permission": "config.read",
+      "enabled": true,
+      "reauth": "none"
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/model-config/drafts",
+      "permission": "config.read",
+      "enabled": true,
+      "reauth": "none"
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/model-config/drafts",
+      "permission": "config.edit",
+      "enabled": true,
+      "reauth": "none"
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/model-config/drafts/{id}",
+      "permission": "config.read",
+      "enabled": true,
+      "reauth": "none"
+    },
+    {
+      "method": "PATCH",
+      "path": "/api/v1/model-config/drafts/{id}",
+      "permission": "config.edit",
+      "enabled": true,
+      "reauth": "credential_changes"
+    },
+    {
+      "method": "DELETE",
+      "path": "/api/v1/model-config/drafts/{id}",
+      "permission": "config.edit",
+      "enabled": true,
+      "reauth": "none"
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/model-config/drafts/{id}/rebase",
+      "permission": "config.edit",
+      "enabled": true,
+      "reauth": "none"
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/model-config/drafts/{id}/resolution",
+      "permission": "config.read",
+      "enabled": true,
+      "reauth": "none"
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/model-config/drafts/{id}/test",
+      "permission": "config.test",
+      "enabled": true,
+      "reauth": "none"
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/model-config/validations/{id}",
+      "permission": "config.read",
+      "enabled": true,
+      "reauth": "none"
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/model-config/drafts/{id}/publish",
+      "permission": "config.publish",
+      "enabled": true,
+      "reauth": "required"
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/model-config/requests/{id}",
+      "permission": "config.read",
+      "enabled": true,
+      "reauth": "none"
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/model-config/releases",
+      "permission": "config.read",
+      "enabled": true,
+      "reauth": "none"
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/model-config/releases/{id}",
+      "permission": "config.read",
+      "enabled": true,
+      "reauth": "none"
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/model-config/releases/{id}/restore",
+      "permission": "config.restore",
+      "enabled": true,
+      "reauth": "required"
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/model-config/releases/{id}/index-catch-up",
+      "permission": "config.restore",
+      "enabled": true,
+      "reauth": "required"
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/model-config/models/discover",
+      "permission": "config.test",
+      "enabled": true,
+      "reauth": "none"
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/model-config/prompts/{key}/revisions",
+      "permission": "config.read",
+      "enabled": true,
+      "reauth": "none"
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/model-config/prompts/{key}/revisions/{id}",
+      "permission": "config.read",
+      "enabled": true,
+      "reauth": "none"
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/model-config/drafts/{id}/prompts/{key}/restore-default",
+      "permission": "config.edit",
+      "enabled": true,
+      "reauth": "none"
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/model-config/prompts/preview",
+      "permission": "config.read",
+      "enabled": true,
+      "reauth": "none"
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/model-config/credentials",
+      "permission": "config.read",
+      "enabled": true,
+      "reauth": "none"
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/model-config/embedding-status",
+      "permission": "config.read",
+      "enabled": true,
+      "reauth": "none"
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/model-config/credentials/{id}/revoke",
+      "permission": "config.credential.revoke",
+      "enabled": true,
+      "reauth": "required"
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/model-config/audits",
+      "permission": "config.audit.read",
+      "enabled": true,
+      "reauth": "none"
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/model-config/endpoint-policies",
+      "permission": "config.read",
+      "enabled": true,
+      "reauth": "none"
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/model-config/endpoint-policies/{id}",
+      "permission": "config.read",
+      "enabled": true,
+      "reauth": "none"
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/model-config/endpoint-policies",
+      "permission": "endpoint.manage",
+      "enabled": true,
+      "reauth": "required"
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/model-config/endpoint-policies/{id}/revoke",
+      "permission": "endpoint.manage",
+      "enabled": true,
+      "reauth": "required"
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/model-config/grants",
+      "permission": "grant.manage",
+      "enabled": true,
+      "reauth": "none"
+    },
+    {
+      "method": "PUT",
+      "path": "/api/v1/model-config/grants/{user_id}",
+      "permission": "grant.manage",
+      "enabled": true,
+      "reauth": "required"
+    },
+    {
+      "method": "DELETE",
+      "path": "/api/v1/model-config/grants/{user_id}",
+      "permission": "grant.manage",
+      "enabled": true,
+      "reauth": "required"
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/model-config/embedding-migrations",
+      "permission": "config.publish",
+      "enabled": true,
+      "reauth": "required"
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/model-config/embedding-migrations/{id}",
+      "permission": "config.read",
+      "enabled": true,
+      "reauth": "none"
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/model-config/credentials/{id}/impact",
+      "permission": "config.read",
+      "enabled": true,
+      "reauth": "none"
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/model-config/outbox",
+      "permission": "config.audit.read",
+      "enabled": true,
+      "reauth": "none"
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/model-config/outbox/{id}",
+      "permission": "config.audit.read",
+      "enabled": true,
+      "reauth": "none"
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/model-config/outbox/{id}/redrive",
+      "permission": "config.outbox.manage",
+      "enabled": true,
+      "reauth": "always"
+    }
+  ]
+}

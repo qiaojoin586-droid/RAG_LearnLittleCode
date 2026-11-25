@@ -16,7 +16,7 @@
 
 import uuid
 from collections import defaultdict
-from datetime import datetime, timedelta
+from datetime import timedelta
 from typing import Dict, List, Optional, Tuple
 
 from sqlalchemy import select, update, func
@@ -26,6 +26,7 @@ from app.core.logger_handler import logger
 from app.core.failed_response import BusinessError, ErrorCode
 from app.models.category import NoteCategory
 from app.models.note import Note
+from app.utils.time_utils import utc_now
 from app.schemas.category import (
     CategoryCreate, CategoryUpdate, CategoryMove, CategoryReorder,
     CategoryResponse, CategoryTreeResponse,
@@ -435,7 +436,7 @@ class CategoryService:
         note_count = note_count.scalar() or 0
 
         # 全部软删除
-        now = datetime.now()
+        now = utc_now()
         for c in [cat] + descendants:
             c.deleted_at = now
 
@@ -698,11 +699,12 @@ class CategoryService:
                     )
             sources.append(cat)
 
-        # 2. 层级限制：目标深度 + 源子树高度（源子分类会被直接挂到目标下，公式见 would_exceed_depth）
+        # 2. 合并时源分类本身消失，最深后代的新深度 = 目标深度 + 源子树高度。
+        # 移动分类的 would_exceed_depth 会额外计算源分类这一层，此处不能复用。
         target_depth = await self.get_depth(db, target_id)
         for cat in sources:
             subtree_height = await self.get_subtree_height(db, user_id, cat.id)
-            if would_exceed_depth(target_depth, subtree_height):
+            if target_depth + subtree_height > MAX_DEPTH:
                 raise BusinessError(
                     code=ErrorCode.INVALID_PARAMETER,
                     message=f"合并后分类「{cat.name}」的子树层级将超过 3 级",
@@ -748,7 +750,7 @@ class CategoryService:
             )
 
         # 6. 软删除源分类
-        now = datetime.now()
+        now = utc_now()
         for cat in sources:
             cat.deleted_at = now
         await db.flush()
@@ -785,7 +787,7 @@ class CategoryService:
                 total += count_descendants(child)
             return total
 
-        now = datetime.now()
+        now = utc_now()
         items = []
         for cat in deleted:
             days_elapsed = (now - cat.deleted_at).days if cat.deleted_at else 0
@@ -810,7 +812,7 @@ class CategoryService:
         活跃节点的父链必完整，多层孤儿在设计流程下不可达；此处仅检查直接子级，
         作为防御代码防止边界情况（如历史数据异常）。
         """
-        cutoff = datetime.now() - timedelta(days=days)
+        cutoff = utc_now() - timedelta(days=days)
 
         result = await db.execute(
             select(NoteCategory).where(

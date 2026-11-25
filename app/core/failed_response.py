@@ -12,8 +12,8 @@
 - 500xx: 服务端错误
 """
 
-import uuid
-from typing import Optional
+from typing import Any, Optional
+from app.core.request_context import current_request_id
 
 
 # ========== 错误码常量定义 ==========
@@ -32,6 +32,7 @@ class ErrorCode:
     UNSUPPORTED_FILE_TYPE = 40005       # 不支持的文件类型
     EMAIL_CODE_INVALID = 40006          # 邮箱验证码错误或已过期
     EMAIL_SEND_FAILED = 40007           # 邮件发送失败
+    MODEL_CONTEXT_EXCEEDED = 40008
     
     # 401xx - 认证失败
     TOKEN_EXPIRED = 40101               # Access Token 已过期
@@ -63,10 +64,13 @@ class ErrorCode:
     # 429xx - 限流
     GLOBAL_RATE_LIMIT = 42901           # 全局频率限制
     ENDPOINT_RATE_LIMIT = 42902         # 单接口频率限制
+    MODEL_BUDGET_EXCEEDED = 42903
     
     # 500xx - 服务端错误
     INTERNAL_ERROR = 50001              # 内部错误
     LLM_CALL_FAILED = 50002             # LLM 调用失败
+    BACKGROUND_CAPACITY_EXCEEDED = 50306
+    RAG_UNAVAILABLE = 50307
 
 
 # 错误码对应的默认消息
@@ -78,6 +82,7 @@ _ERROR_MESSAGES = {
     ErrorCode.UNSUPPORTED_FILE_TYPE: "不支持的文件类型",
     ErrorCode.EMAIL_CODE_INVALID: "验证码错误或已过期",
     ErrorCode.EMAIL_SEND_FAILED: "邮件发送失败，请稍后重试",
+    ErrorCode.MODEL_CONTEXT_EXCEEDED: "本轮内容超出模型上下文窗口，请缩短问题或减少附件",
     ErrorCode.TOKEN_EXPIRED: "Access Token 已过期",
     ErrorCode.TOKEN_INVALID: "Token 无效",
     ErrorCode.PASSWORD_ERROR: "密码错误",
@@ -99,8 +104,11 @@ _ERROR_MESSAGES = {
     ErrorCode.CATEGORY_NAME_EXISTS: "同级分类下已存在同名分类",
     ErrorCode.GLOBAL_RATE_LIMIT: "请求频率过高，请稍后再试",
     ErrorCode.ENDPOINT_RATE_LIMIT: "该接口请求频率过高，请稍后再试",
+    ErrorCode.MODEL_BUDGET_EXCEEDED: "本次任务的模型调用超出预算或缺少可计价额度",
     ErrorCode.INTERNAL_ERROR: "服务器内部错误",
     ErrorCode.LLM_CALL_FAILED: "AI 模型调用失败",
+    ErrorCode.BACKGROUND_CAPACITY_EXCEEDED: "当前任务较多，请稍后重试",
+    ErrorCode.RAG_UNAVAILABLE: "知识检索暂不可用，请稍后重试",
 }
 
 
@@ -122,12 +130,14 @@ class BusinessError(Exception):
         code: int,
         message: Optional[str] = None,
         detail: Optional[str] = None,
-        http_status: int = 400
+        http_status: int = 400,
+        data: Any = None,
     ):
         self.code = code
         self.message = message or _ERROR_MESSAGES.get(code, "未知错误")
         self.detail = detail
         self.http_status = http_status
+        self.data = data
         super().__init__(self.message)
 
 
@@ -135,7 +145,8 @@ def failed_response(
     code: int,
     message: Optional[str] = None,
     detail: Optional[str] = None,
-    request_id: Optional[str] = None
+    request_id: Optional[str] = None,
+    data: Any = None,
 ) -> dict:
     """
     构造统一格式的失败响应
@@ -153,5 +164,6 @@ def failed_response(
         "code": code,
         "message": message or _ERROR_MESSAGES.get(code, "未知错误"),
         "detail": detail,
-        "request_id": request_id or str(uuid.uuid4())
+        "data": data,
+        "request_id": request_id or current_request_id()
     }

@@ -1,0 +1,13 @@
+{
+  "version": 1,
+  "corpus_and_queries": "rag_m3_05_baseline.json",
+  "corpus_sha256": "6f6c51d2d2496a5bebab5de79db71f5665b93055ca18bbb14555fb0a6e2670b6",
+  "concurrency": 4,
+  "warmup_requests": 8,
+  "measured_requests": 100,
+  "top_k": 3,
+  "query_order": "round_robin",
+  "p95_method": "nearest_rank",
+  "max_p95_ms": 1000,
+  "allowed_errors": 0
+}

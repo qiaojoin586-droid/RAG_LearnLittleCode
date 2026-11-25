@@ -13,9 +13,11 @@ import traceback
 from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
+from starlette.exceptions import HTTPException
 
 from app.core.logger_handler import logger
 from app.core.failed_response import BusinessError, failed_response, ErrorCode
+from app.core.request_context import RequestIdMiddleware
 
 
 def register_exception_handlers(app: FastAPI) -> None:
@@ -26,6 +28,22 @@ def register_exception_handlers(app: FastAPI) -> None:
         app: FastAPI 应用实例
     """
     
+    app.add_middleware(RequestIdMiddleware)
+
+    @app.exception_handler(HTTPException)
+    async def http_error_handler(request: Request, exc: HTTPException):
+        detail = exc.detail if isinstance(exc.detail, dict) else {}
+        code = detail.get("code", {
+            401: ErrorCode.TOKEN_INVALID, 429: ErrorCode.ENDPOINT_RATE_LIMIT,
+        }.get(exc.status_code, ErrorCode.INVALID_PARAMETER))
+        identifier = request.state.request_id
+        return JSONResponse(status_code=exc.status_code, headers={
+            **(exc.headers or {}), "X-Request-ID": identifier,
+        }, content=failed_response(
+            code=code, message=detail.get("message") or "请求未能完成",
+            request_id=identifier, data={"reason": "HTTP_ERROR"},
+        ))
+
     @app.exception_handler(BusinessError)
     async def business_error_handler(request: Request, exc: BusinessError):
         """
@@ -43,7 +61,9 @@ def register_exception_handlers(app: FastAPI) -> None:
             content=failed_response(
                 code=exc.code,
                 message=exc.message,
-                detail=exc.detail
+                detail=exc.detail,
+                data=exc.data,
+                request_id=request.state.request_id,
             )
         )
     
@@ -59,7 +79,7 @@ def register_exception_handlers(app: FastAPI) -> None:
         errors = []
         for error in exc.errors():
             field = " -> ".join(str(loc) for loc in error["loc"])
-            errors.append(f"{field}: {error['msg']}")
+            errors.append(f"{field}: {error['type']}")
         
         detail = "; ".join(errors)
         
@@ -72,7 +92,9 @@ def register_exception_handlers(app: FastAPI) -> None:
             content=failed_response(
                 code=ErrorCode.FORMAT_VALIDATION_FAILED,
                 message="请求参数校验失败",
-                detail=detail
+                detail=detail,
+                data={"reason": "FORMAT_VALIDATION_FAILED"},
+                request_id=request.state.request_id,
             )
         )
     
@@ -93,8 +115,10 @@ def register_exception_handlers(app: FastAPI) -> None:
         
         return JSONResponse(
             status_code=500,
+            headers={"X-Request-ID": request.state.request_id},
             content=failed_response(
                 code=ErrorCode.INTERNAL_ERROR,
-                message="服务器内部错误"
+                message="服务器内部错误",
+                request_id=request.state.request_id,
             )
         )

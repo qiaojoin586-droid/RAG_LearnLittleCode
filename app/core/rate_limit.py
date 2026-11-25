@@ -11,11 +11,11 @@
 import time
 from typing import Optional
 
-from fastapi import Request, HTTPException
+from fastapi import Request
 import redis.asyncio as aioredis
 
 from app.core.logger_handler import logger
-from app.core.failed_response import ErrorCode
+from app.core.failed_response import BusinessError, ErrorCode
 
 # ========== 接口级限流配置 ==========
 # 每个端点的限流配置：次数/分钟
@@ -170,12 +170,9 @@ def rate_limit(
         )
 
         if not allowed:
-            raise HTTPException(
-                status_code=429,
-                detail={
-                    "code": ErrorCode.ENDPOINT_RATE_LIMIT,
-                    "message": "请求频率过高，请稍后再试"
-                }
+            raise BusinessError(
+                code=ErrorCode.ENDPOINT_RATE_LIMIT, http_status=429,
+                data={"reason": "ENDPOINT_RATE_LIMIT"},
             )
 
     return dependency

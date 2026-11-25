@@ -38,7 +38,17 @@ Thumbs.db
 .coverage
 htmlcov/
 .pytest_cache/
+.pytest_tmp/
+pytest-of-*/
+torchinductor_*/
 backups/
+
+# 本地工具目录（不入库）
+.workbuddy/
+.cache/
 
 # 设计文档（历史版本，仅本地保留，不入库）
 docs/设计方案（不可提交）/
+
+# GitHub Actions
+.github/

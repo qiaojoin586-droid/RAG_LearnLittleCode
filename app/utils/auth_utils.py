@@ -379,6 +379,7 @@ async def is_token_blacklisted(jti: str) -> bool:
 # ========== FastAPI 依赖注入 ==========
 
 async def get_current_user_id(
+    request: Request,                                   # ★ C2：供限流按 user_id 计数
     authorization: Optional[str] = Header(None),
     db: AsyncSession = Depends(get_db)
 ) -> str:
@@ -445,7 +446,16 @@ async def get_current_user_id(
             code=ErrorCode.TOKEN_INVALID,
             http_status=401
         )
-    
+
+    # ★ S3/C2：写入 request.state，供限流依赖（rate_limit）按 user_id 计数。
+    # 生效前提：端点参数里 get_current_user_id 必须排在 rate_limit 之前
+    #（router 级 dependencies 会先执行，读不到这里写入的值）。
+    request.state.user_id = user_id
+    # Configuration reauthentication binds to this already verified access JWT.
+    request.state.auth_claims = payload.copy()
+    from app.model_config.snapshots import inference_actor
+    inference_actor.set({'user_id':user_id,'jti':payload.get('jti'),'expires':payload.get('exp')})
+
     return user_id
 
 

@@ -18,47 +18,22 @@ Agent 工具集
 
 import json
 import os
-import re
-import time
 import uuid
 from datetime import datetime
 from pathlib import Path
 from typing import Optional, List
 
 from langchain_core.tools import tool
+from sqlalchemy import select
 
+from app.ai_service.tool_operations import request_email_approval, run_tool_write
+from app.ai_service.email_dispatch import email_arguments
+from app.ai_service.note_tool_writes import apply_write, replay_write
+from app.ai_service.detached_chat import restrict_background_tools
 from app.ai_service.tool_registry import init_tool_registry, tool_registry
 from app.core.logger_handler import logger
+from app.core.failed_response import BusinessError
 from app.utils.factory import get_shared_async_client
-
-
-# ============================================================
-# send_email 安全校验与限流（P2-3）
-# ============================================================
-
-_EMAIL_RE = re.compile(r"^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}$")
-_MAX_EMAIL_ADDR_CHARS = 254
-_MAX_EMAIL_SUBJECT_CHARS = 200
-_MAX_EMAIL_BODY_CHARS = 50000
-_EMAIL_FORMATS = ("md", "pdf", "text")
-
-# 每用户发送记录（user_id -> [发送时刻时间戳]），进程内滑动窗口；
-# 多进程/多机部署时需改用 Redis 等共享存储
-_email_send_history: dict = {}
-
-
-def _email_rate_allowed(user_id: str, limit: int, window_sec: int = 3600) -> bool:
-    """检查每用户每小时发送上限（仅检查不计数，发送成功后再记录）"""
-    now = time.time()
-    history = _email_send_history.setdefault(user_id, [])
-    while history and history[0] <= now - window_sec:
-        history.pop(0)
-    return len(history) < limit
-
-
-def _email_send_record(user_id: str) -> None:
-    """记录一次成功发送（供限流窗口使用）"""
-    _email_send_history.setdefault(user_id, []).append(time.time())
 
 
 # ============================================================
@@ -336,8 +311,17 @@ def create_agent_tools(
 
             return f"今日待回顾 ({len(reviews)} 篇):\n" + "\n".join(lines)
 
-    @tool
-    async def mark_reviewed_tool(review_id: int) -> str:
+    async def _note_write(name, arguments):
+        async def write(db, after_commit):
+            return await apply_write(db, user_id, name, arguments, after_commit, note_service, review_service)
+
+        async def replay(db, reference):
+            return await replay_write(db, user_id, name, reference, note_service)
+
+        return await run_tool_write(db_session_factory, user_id, name, arguments, write, replay)
+
+    @tool(response_format="content_and_artifact")
+    async def mark_reviewed_tool(review_id: int) -> tuple[str, dict | None]:
         """
         标记一条回顾记录为已完成
 
@@ -345,40 +329,12 @@ def create_agent_tools(
             review_id: 回顾记录 ID
         """
         if not db_session_factory or not review_service:
-            return "服务未初始化"
+            return "服务未初始化", None
 
-        async with db_session_factory() as db:
-            review = await review_service.mark_reviewed(db, review_id, user_id)
-            await db.commit()
-            return f"回顾完成！下次回顾时间: {review.next_review_at.strftime('%Y-%m-%d')}"
+        return await _note_write('mark_reviewed_tool', {'review_id': review_id})
 
-    async def _resolve_category(db, category_name: str):
-        """
-        将分类名称解析为 (category_id, category_name)（透明 name→ID 适配，设计 §8.3）
-
-        未找到匹配分类时返回 (None, 原字符串)——降级写入 category 字符串，
-        笔记不丢失，后续可在分类树中看到（作为新分类或归入对应分类）。
-        """
-        if not category_name:
-            return None, None
-
-        from sqlalchemy import select
-        from app.models.category import NoteCategory
-
-        result = await db.execute(
-            select(NoteCategory).where(
-                NoteCategory.user_id == user_id,
-                NoteCategory.name == category_name,
-                NoteCategory.deleted_at.is_(None),
-            )
-        )
-        cat = result.scalar_one_or_none()
-        if cat:
-            return cat.id, cat.name
-        return None, category_name
-
-    @tool
-    async def create_note_tool(title: str, content: str, tags: str = "", category: str = "") -> str:
+    @tool(response_format="content_and_artifact")
+    async def create_note_tool(title: str, content: str, tags: str = "", category: str = "") -> tuple[str, dict | None]:
         """
         创建一条新笔记
 
@@ -389,27 +345,16 @@ def create_agent_tools(
             category: 分类名称
         """
         if not db_session_factory or not note_service:
-            return "服务未初始化"
-
-        from app.schemas.note import NoteCreate
+            return "服务未初始化", None
 
         tag_list = [t.strip() for t in tags.split(",") if t.strip()] if tags else []
+        return await _note_write('create_note_tool', {
+            'title': title, 'content': content, 'tags': tag_list, 'category': category or None,
+        })
 
-        async with db_session_factory() as db:
-            # 分类管理功能：name→ID 透明解析，双写两个字段（未匹配时降级保留字符串）
-            category_id, category_name = await _resolve_category(db, category)
-            note = await note_service.create_note(
-                db, user_id,
-                NoteCreate(
-                    title=title, content=content, tags=tag_list,
-                    category=category_name, category_id=category_id,
-                )
-            )
-            await db.commit()
-            return f"笔记创建成功！ID: {note.id}, 标题: {note.title}"
-
-    @tool
-    async def update_note_tool(note_id: str, title: str = None, content: str = None, tags: str = None, category: str = None) -> str:
+    @tool(response_format="content_and_artifact")
+    async def update_note_tool(note_id: str, title: str = None, content: str = None, tags: str = None,
+                               category: str = None) -> tuple[str, dict | None]:
         """
         更新一条已有笔记的内容、标题、标签或分类。
         只需传入要修改的字段，未传入的字段保持不变。
@@ -423,9 +368,7 @@ def create_agent_tools(
             category: 新分类名称（可选，不传则保持原分类不变）
         """
         if not db_session_factory or not note_service:
-            return "服务未初始化"
-
-        from app.schemas.note import NoteUpdate
+            return "服务未初始化", None
 
         update_data = {}
         if title is not None:
@@ -436,25 +379,13 @@ def create_agent_tools(
             update_data["tags"] = [t.strip() for t in tags.split(",") if t.strip()]
 
         if not update_data and category is None:
-            return "未提供任何要更新的字段"
+            return "未提供任何要更新的字段", None
 
-        async with db_session_factory() as db:
-            try:
-                # 分类管理功能：name→ID 透明解析，双写两个字段（未匹配时降级保留字符串）
-                if category is not None:
-                    category_id, category_name = await _resolve_category(db, category)
-                    update_data["category"] = category_name
-                    update_data["category_id"] = category_id
-
-                note = await note_service.update_note(
-                    db, note_id, user_id, NoteUpdate(**update_data)
-                )
-                await db.commit()
-                return f"笔记更新成功！ID: {note.id}, 标题: {note.title}"
-            except Exception as e:
-                # 审查 M15：内部异常细节仅入日志，工具返回类别级提示
-                logger.warning(f"笔记更新失败: note_id={note_id}, error={e}")
-                return "笔记更新失败，请稍后重试"
+        try:
+            return await _note_write('update_note_tool', {'note_id': note_id, **update_data, 'category': category})
+        except Exception as error:
+            logger.warning(f"笔记更新失败: note_id={note_id}, error_type={type(error).__name__}")
+            return "笔记更新失败，请稍后重试", None
 
     @tool
     async def get_related_notes_tool(note_title: str, top_k: int = 3) -> str:
@@ -480,75 +411,25 @@ def create_agent_tools(
 
             return "相关笔记:\n" + "\n".join(output)
 
-    @tool
-    async def send_email(to: str, subject: str, body: str, format: str = "md") -> str:
+    @tool(response_format='content_and_artifact')
+    async def send_email(to: str, subject: str, body: str, format: str = "md") -> tuple[str, dict | None]:
         """
-        发送邮件。这是唯一能真正把邮件发送出去的工具：当用户要求将笔记发送到邮箱时，必须调用本工具完成发送，
-        不得仅用文字回复代替。支持以 Markdown 或 PDF 附件形式发送。
-
-        收件人确定规则：用户在对话中明确给出的目标邮箱地址优先（可以发送给任何人的邮箱）；
-        用户未给出地址时，先通过 get_user_info_tools 获取用户本人绑定邮箱作为收件人；
-        仍无邮箱则询问用户。无论哪种情况，发送前必须与用户确认收件人地址。
+        申请发送邮件。助手提交收件人、主题、正文和格式，用户在待确认操作中核对并决定。
+        等待确认时请提示用户查看申请。只有回执表明邮件受理或收件后，才报告对应状态。
 
         Args:
-            to: 收件人邮箱地址（用户明确给出的目标地址，或用户本人绑定邮箱；必须与用户确认过）
+            to: 收件人邮箱地址（用户明确给出的目标地址，或用户本人绑定邮箱）
             subject: 邮件主题（如 "笔记导出：{笔记标题}"）
             body: 邮件正文（Markdown 格式，建议包含笔记标题、分类/标签元信息和完整内容）
             format: 附件格式："md"（Markdown 附件，默认）/ "pdf"（PDF 附件）/ "text"（仅正文，无附件）
         """
-        # ===== 安全校验（P2-3）=====
-        to = (to or "").strip()
-        if not _EMAIL_RE.fullmatch(to):
-            return "邮件发送失败：收件人邮箱地址格式不正确"
-        if len(to) > _MAX_EMAIL_ADDR_CHARS:
-            return "邮件发送失败：收件人邮箱地址过长"
-        subject = (subject or "").strip()
-        body = body or ""
-        if not subject:
-            return "邮件发送失败：邮件主题不能为空"
-        if len(subject) > _MAX_EMAIL_SUBJECT_CHARS:
-            return f"邮件发送失败：邮件主题过长（最多 {_MAX_EMAIL_SUBJECT_CHARS} 字符）"
-        if len(body) > _MAX_EMAIL_BODY_CHARS:
-            return f"邮件发送失败：邮件正文过长（最多 {_MAX_EMAIL_BODY_CHARS} 字符）"
-        if format not in _EMAIL_FORMATS:
-            return "邮件发送失败：format 仅支持 md / pdf / text"
-        # 每用户限流（发送成功后才计数）
-        from app.utils.config import get_security_config
-        rate_limit_per_hour = get_security_config().get("email_rate_limit_per_hour", 10)
-        if not _email_rate_allowed(user_id, rate_limit_per_hour):
-            return f"邮件发送过于频繁，请稍后再试（每小时最多发送 {rate_limit_per_hour} 封）"
-
-        if not email_service:
-            return "邮件服务未初始化，请联系管理员"
+        if not email_service or not email_service.available:
+            return '邮件服务未初始化，请联系管理员', None
         try:
-            attachments = None
-            if format == "pdf":
-                try:
-                    pdf_bytes = email_service.render_markdown_pdf(subject, body)
-                    attachments = [{
-                        "filename": f"{re.sub(r'[\\\\/:*?\"<>|]', '_', subject)}.pdf",
-                        "data": pdf_bytes,
-                        "mime": "application/pdf",
-                    }]
-                except Exception as e:
-                    # PDF 生成失败 → 降级为 Markdown 附件
-                    logger.error(f"PDF 生成失败，降级为 MD 附件: {e}")
-                    format = "md"
-            if format == "md":
-                attachments = attachments or [{
-                    "filename": f"{re.sub(r'[\\\\/:*?\"<>|]', '_', subject)}.md",
-                    "data": body.encode("utf-8"),
-                    "mime": "text/markdown",
-                }]
-
-            await email_service.send_email(to, subject, body, attachments=attachments)
-            _email_send_record(user_id)  # 发送成功后计数（P2-3 限流）
-            fmt_label = {"md": "Markdown", "pdf": "PDF", "text": "文本"}.get(format, "Markdown")
-            return f"笔记已成功以{fmt_label}形式发送至 {to}（若收件人长时间未收到，请让其检查垃圾邮件箱）"
-        except Exception as e:
-            # 捕获所有异常返回友好提示，防止 SMTP 异常冒泡导致 Agent 循环中断
-            logger.error(f"邮件发送失败: to={to}, error={e}")
-            return f"邮件发送失败：{e}。请检查邮箱地址是否正确，或稍后重试。"
+            arguments = email_arguments(to, subject, body, format)
+            return await request_email_approval(db_session_factory, user_id, arguments)
+        except BusinessError as error:
+            return f'邮件申请失败：{error.message}', None
 
     @tool
     async def generate_ppt_tool(
@@ -624,17 +505,26 @@ def create_agent_tools(
 
         # 按用户目录隔离存储（与 ppt_router 安全模型一致：音频含笔记内容，不走公开目录）
         from app.routers.tts_router import TTS_FILE_ROOT
-        file_id = uuid.uuid4().hex
+        from app.ai_service.tool_results import artifact_output_id
+
+        file_id = artifact_output_id.get() or uuid.uuid4().hex
         user_tts_dir = Path(TTS_FILE_ROOT) / user_id
         user_tts_dir.mkdir(parents=True, exist_ok=True)
         output_file = user_tts_dir / f"{file_id}.mp3"
+        temporary = output_file.with_suffix('.mp3.part')
         try:
             communicate = edge_tts.Communicate(text, voice)
-            await communicate.save(str(output_file))
+            await communicate.save(str(temporary))
+            temporary.replace(output_file)
         except Exception as e:
             # 捕获所有异常返回友好提示，防止异常冒泡导致 Agent 循环中断
             logger.error(f"TTS 生成失败: user={user_id[:8]}, error={e}")
             return f"语音生成失败：{e}。请稍后重试或改用文字阅读。"
+        finally:
+            try:
+                temporary.unlink(missing_ok=True)
+            except OSError:
+                logger.warning('TTS 临时文件将在定时清理中回收')
         duration = f"~{max(len(text) // 10, 1)}s"
         if truncated:
             duration += "（内容超长已截断）"
@@ -684,7 +574,7 @@ def create_agent_tools(
             logger.warning(f"工具组 '{group_name}' 未在 agent.yaml 中定义，跳过")
 
     # 组名列表 → 工具名列表（None 表示全部组，向后兼容）
-    resolved_names = tool_registry.resolve_names(groups)
+    resolved_names = restrict_background_tools(tool_registry.resolve_names(groups))
 
     result = []
     for name in resolved_names:
@@ -697,10 +587,7 @@ def create_agent_tools(
             else:
                 logger.warning(f"工具路由: 工具 '{name}' 未注册，跳过")
 
-    # 安全保底：至少包含 base 组工具
-    if not result:
-        logger.warning("按需加载结果为空，回退到全量工具")
-        return list(all_tools.values())
+    # An explicit empty or unknown selection grants no tools.
 
     logger.debug(f"工具按需加载: groups={groups}, 选中 {len(result)} 个工具（注册表解析）")
     return result

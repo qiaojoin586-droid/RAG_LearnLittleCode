@@ -9,11 +9,50 @@
 运行: python -m pytest tests/test_category_logic.py -v
 """
 
+import asyncio
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, MagicMock
+
 import pytest
 from pydantic import ValidationError
 
-from app.services.category_service import would_exceed_depth, MAX_DEPTH
+from app.services.category_service import CategoryService, would_exceed_depth, MAX_DEPTH
+from app.core.failed_response import BusinessError
 from app.schemas.category import CategoryBatchOperation, CategoryReorder
+
+
+@pytest.mark.parametrize("target_depth,source_height,allowed", [
+    (2, 0, True),   # 仅移动笔记，不增加目标分类层级
+    (1, 1, True),   # 源子分类挂到目标下，最深处恰为第三级
+    (0, 2, True),
+    (2, 1, False),
+    (1, 2, False),
+])
+def test_merge_uses_depth_after_source_category_is_removed(target_depth, source_height, allowed):
+    service = CategoryService()
+    categories = {key: SimpleNamespace(id=key, name=key, deleted_at=None)
+                  for key in ("source", "target")}
+
+    async def get_category(db, user_id, category_id):
+        return categories[category_id]
+
+    service._get_active_category = get_category
+    service.would_create_cycle = AsyncMock(return_value=False)
+    service.get_depth = AsyncMock(return_value=target_depth)
+    service.get_subtree_height = AsyncMock(return_value=source_height)
+    service._next_sort_order = AsyncMock(return_value=0)
+    result = MagicMock()
+    result.all.return_value = []
+    result.scalars.return_value.all.return_value = []
+    db = SimpleNamespace(execute=AsyncMock(return_value=result), flush=AsyncMock())
+    if allowed:
+        merged = asyncio.run(service.merge_categories(db, "user", ["source"], "target"))
+        assert merged["merged_count"] == 1
+        assert categories["source"].deleted_at is not None
+    else:
+        with pytest.raises(BusinessError, match="超过 3 级"):
+            asyncio.run(service.merge_categories(db, "user", ["source"], "target"))
+        db.execute.assert_not_awaited()
 
 
 # ========== 层级校验公式（设计 §7.2） ==========

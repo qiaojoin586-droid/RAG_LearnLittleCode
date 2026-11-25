@@ -13,6 +13,7 @@
 """
 
 import asyncio
+import inspect
 from typing import Awaitable, Optional
 
 from app.core.logger_handler import logger
@@ -39,9 +40,17 @@ def spawn_background_task(coro: Awaitable, name: str = "background") -> Optional
         logger.error(
             f"后台任务并发超限（{MAX_BACKGROUND_TASKS}），拒绝启动: {name}"
         )
+        # Admission failed before asyncio owns the coroutine. Close it explicitly.
+        if inspect.iscoroutine(coro):
+            coro.close()
         return None
 
-    task = asyncio.create_task(coro, name=name)
+    try:
+        task = asyncio.create_task(coro, name=name)
+    except BaseException:
+        if inspect.iscoroutine(coro):
+            coro.close()
+        raise
     _active_tasks.add(task)
 
     def _on_done(t: asyncio.Task) -> None:

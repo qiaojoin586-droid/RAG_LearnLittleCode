@@ -1,0 +1,19 @@
+# 前端构建上下文忽略清单（front/ 作为 build context 时生效）
+# 作用：node_modules 有 1.8 万+ 文件，若打进构建上下文会导致：
+#   1) 上下文上传极慢，构建耗时显著增加
+#   2) 容器内 COPY . . 覆盖掉 npm ci 刚装好的依赖，可能引入平台不一致的原生模块
+
+# 依赖与产物（容器内重新安装/构建）
+node_modules
+dist
+
+# 版本控制与 IDE
+.git
+.gitignore
+.idea
+.vscode
+
+# 日志与临时文件
+*.log
+*.tmp
+.DS_Store

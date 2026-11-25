@@ -12,7 +12,7 @@ Create Date: 2026-08-21
 """
 from typing import Sequence, Union
 
-from alembic import op
+from alembic import context, op
 import sqlalchemy as sa
 
 
@@ -25,6 +25,10 @@ depends_on: Union[str, Sequence[str], None] = None
 
 def upgrade() -> None:
     """新增文档类型列（存量数据由列默认值自动填 'md'）"""
+    if not context.is_offline_mode():
+        columns = sa.inspect(op.get_bind()).get_columns('notes')
+        if any(column['name'] == 'format' for column in columns):
+            return
     op.add_column(
         'notes',
         sa.Column('format', sa.String(length=10), nullable=False, server_default='md'),

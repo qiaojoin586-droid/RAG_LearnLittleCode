@@ -85,7 +85,7 @@ describe('client 响应拦截器（401 刷新）', () => {
   });
 
   const make401 = (url = '/api/v1/chat/query') => ({
-    response: { status: 401 },
+    response: { status: 401, data: { code: 40101 } },
     config: { headers: {} as Record<string, string>, url },
     isAxiosError: true,
   });
@@ -153,5 +153,23 @@ describe('client 响应拦截器（401 刷新）', () => {
     const error = { response: { status: 500 }, config: { headers: {} }, isAxiosError: true };
     await expect((state.responseErr as (e: unknown) => Promise<unknown>)(error)).rejects.toBe(error);
     expect(state.store.logout).not.toHaveBeenCalled();
+  });
+
+  it.each([40110, 40111, 40103])('业务认证错误 %s 不刷新或登出', async (code) => {
+    localStorage.setItem('jwt_refresh_token', 'refresh');
+    const error = make401();
+    error.response.data.code = code;
+    await expect((state.responseErr as (e: unknown) => Promise<unknown>)(error)).rejects.toBe(error);
+    expect(postMock).not.toHaveBeenCalled();
+    expect(state.store.logout).not.toHaveBeenCalled();
+  });
+
+  it('刷新失败会拒绝所有排队请求，不遗留等待', async () => {
+    localStorage.setItem('jwt_refresh_token', 'refresh');
+    postMock.mockRejectedValueOnce(new Error('refresh failed'));
+    const handler = state.responseErr as (e: unknown) => Promise<unknown>;
+    const results = await Promise.allSettled([handler(make401('/a')), handler(make401('/b'))]);
+    expect(results.map((result) => result.status)).toEqual(['rejected', 'rejected']);
+    expect(postMock).toHaveBeenCalledTimes(1);
   });
 });

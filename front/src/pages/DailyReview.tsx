@@ -16,7 +16,7 @@ import { useState, useEffect, useRef } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
 import { toast } from 'sonner';
-import { BookOpen, CheckCircle, BarChart3 } from 'lucide-react';
+import { BookOpen, CheckCircle, BarChart3, Sparkles } from 'lucide-react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import rehypeHighlight from 'rehype-highlight';
@@ -26,7 +26,7 @@ import { notesApi } from '../api/notes';
 import EmptyState from '../components/common/EmptyState';
 import { useReviewBridgeStore } from '../stores/useReviewBridgeStore';
 import { isHtml, htmlToMarkdown, normalizeNoteContent, escapeInlineHtml } from '../utils/markdownCompat';
-import type { ReviewRecord, ReviewStats } from '../types/api';
+import type { ReviewRecord, ReviewStats, ReviewQuestion } from '../types/api';
 
 /** 掌握程度选项（1-5） */
 const qualityOptions = [
@@ -47,6 +47,11 @@ export default function DailyReview() {
   const [currentIndex, setCurrentIndex] = useState(0);
   const [showStats, setShowStats] = useState(false);
   const [completing, setCompleting] = useState(false);
+
+  // AI 复习题（按需生成，6h 缓存）
+  const [questions, setQuestions] = useState<ReviewQuestion[]>([]);
+  const [aiLoading, setAiLoading] = useState(false);
+  const [revealed, setRevealed] = useState<Record<number, boolean>>({});
 
   // 预览区状态（侧边栏选择条目后加载完整笔记内容，只读展示）
   const [previewTitle, setPreviewTitle] = useState('');
@@ -149,6 +154,34 @@ export default function DailyReview() {
 
   /** 当前正在回顾的笔记 */
   const currentReview = reviews[currentIndex];
+
+  // 切换回顾条目时清空上一条的 AI 复习题
+  useEffect(() => {
+    setQuestions([]);
+    setRevealed({});
+  }, [currentReview?.review_id]);
+
+  /** AI 生成复习题（同一笔记内容 6 小时内命中缓存，不重复计费） */
+  const handleGenerateQuestions = async () => {
+    const review = reviews[currentIndex];
+    if (!review || aiLoading) return;
+    setAiLoading(true);
+    setRevealed({});
+    try {
+      const res = await reviewApi.generateQuestions(review.review_id);
+      const data = res.data.data;
+      if (data.questions?.length) {
+        setQuestions(data.questions);
+      } else {
+        toast.error(t('review.ai.failed'));
+      }
+    } catch {
+      toast.error(t('review.ai.failed'));
+    } finally {
+      setAiLoading(false);
+    }
+  };
+
   const isFinished = reviews.length === 0 && !loading;
   const progress = stats ? (stats.completed_today / (stats.completed_today + stats.pending_today)) * 100 : 0;
 
@@ -226,7 +259,40 @@ export default function DailyReview() {
                     <BookOpen size={14} />
                     查看原文
                   </button>
+                  <button
+                    onClick={handleGenerateQuestions}
+                    disabled={aiLoading}
+                    className="flex items-center gap-1 text-sm text-[var(--color-accent)] hover:underline disabled:opacity-50"
+                  >
+                    <Sparkles size={14} />
+                    {aiLoading ? t('review.ai.loading') : t('review.ai.generate')}
+                  </button>
                 </div>
+
+                {/* AI 复习题（生成后展示，答案默认折叠） */}
+                {questions.length > 0 && (
+                  <div className="mb-3 rounded-lg border border-[var(--color-border)] bg-[var(--color-surface-alt)] p-3 space-y-2">
+                    {questions.map((q, i) => (
+                      <div key={i} className="text-sm">
+                        <p className="text-[var(--color-text)]">
+                          Q{i + 1}. {q.question}
+                        </p>
+                        <button
+                          type="button"
+                          onClick={() => setRevealed((prev) => ({ ...prev, [i]: !prev[i] }))}
+                          className="mt-0.5 text-xs text-[var(--color-text-tertiary)] hover:underline"
+                        >
+                          {revealed[i] ? t('review.ai.hideAnswer') : t('review.ai.showAnswer')}
+                        </button>
+                        {revealed[i] && q.answer && (
+                          <p className="mt-1 text-[var(--color-text-secondary)] whitespace-pre-wrap">
+                            {q.answer}
+                          </p>
+                        )}
+                      </div>
+                    ))}
+                  </div>
+                )}
 
                 {/* 掌握程度评分 */}
                 <p className="text-sm text-[var(--color-text-secondary)] mb-2">

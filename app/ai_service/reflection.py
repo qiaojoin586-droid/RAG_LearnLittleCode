@@ -10,6 +10,8 @@ L1 结果自检：生成 → 批判 → 修正，单轮闭环）。
 核心原则（fail-safe）：反思是增强不是关卡。批判解析失败/超时/异常一律返回
 passed=True，绝不阻塞回答输出。
 """
+from app.model_config.runtime import model_for, template_for
+from app.model_config.snapshots import current_snapshot
 
 import asyncio
 import json
@@ -18,6 +20,7 @@ from dataclasses import dataclass
 from typing import Optional
 
 from langchain_core.messages import HumanMessage
+from app.ai_service.context_composer import with_data
 
 from app.core.logger_handler import logger
 
@@ -116,16 +119,21 @@ async def critique_answer(
     Returns:
         ReflectionVerdict；任何异常 → passed=True
     """
+    plan_model = model_for('reflection', plan_model)
     try:
         prompt = build_critique_prompt(user_message, plan_summary, step_results_text, draft)
         async with asyncio.timeout(timeout):
-            response = await plan_model.ainvoke([HumanMessage(content=prompt)])
+            response = await plan_model.ainvoke(with_data([HumanMessage(content=prompt)]))
             content = getattr(response, "content", "") or ""
             content = str(content).strip()
     except asyncio.TimeoutError:
+        from app.model_config.runtime import require_failure_policy
+        require_failure_policy('reflection','disabled')
         logger.warning(f"批判调用超时 ({timeout}s)，视为通过")
         return ReflectionVerdict(passed=True)
     except Exception as e:
+        from app.model_config.runtime import require_failure_policy
+        require_failure_policy('reflection','disabled')
         logger.warning(f"批判调用异常（视为通过）: {type(e).__name__}: {e}")
         return ReflectionVerdict(passed=True)
 

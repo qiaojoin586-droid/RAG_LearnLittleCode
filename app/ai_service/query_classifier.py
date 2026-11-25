@@ -7,6 +7,8 @@
 
 L1 可确定 simple/complex，不确定时交给 L2 判断。
 """
+from app.model_config.runtime import model_for, template_for,require_failure_policy
+from app.model_config.snapshots import current_snapshot
 
 import json
 import re
@@ -38,14 +40,14 @@ class QueryClassifier:
         Args:
             llm_model: L2 精判用的轻量 Chat 模型（可选，为 None 时仅用规则）
         """
-        self.llm_model = llm_model
+        self.llm_model = model_for('classifier', llm_model)
         config = get_classifier_config()
 
         # 从配置加载规则
         self.complex_patterns: List[str] = config.get("rule_complex_keywords", [])
         self.simple_patterns: List[str] = config.get("rule_simple_patterns", [])
         self.complex_min_length: int = config.get("rule_complex_min_length", 200)
-        self.llm_enabled: bool = config.get("llm_enabled", True)
+        self.llm_enabled: bool = True if current_snapshot() is not None else config.get("llm_enabled", True)
         # L1 补充规则（迁移自 _rule_classify 的硬编码，默认值与原代码一致）
         self.tool_keywords: List[str] = config.get(
             "tool_keywords", ["搜索", "搜索笔记", "统计", "回顾", "创建", "更新", "推荐", "标记"]
@@ -92,6 +94,7 @@ class QueryClassifier:
                 )
                 return llm_result
             except Exception as e:
+                require_failure_policy('classifier','rule_only')
                 logger.warning(f"L2 LLM 分类失败，降级为 simple: {e}")
                 return ClassificationResult("simple", "rule", f"llm_fallback: {e}", 0.5)
 

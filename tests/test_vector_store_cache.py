@@ -7,6 +7,9 @@ Embedding 缓存 LRU 上限测试（生产风险分析·风险1）
 """
 
 import hashlib
+import os
+from pathlib import Path
+from unittest.mock import AsyncMock, Mock
 
 import pytest
 
@@ -58,3 +61,61 @@ async def test_cache_hit_keeps_entry_alive(service):
     assert _hash("text-0") in service._embedding_cache, "刚命中的 text-0 不应被淘汰"
     assert _hash("text-1") not in service._embedding_cache, "最旧的 text-1 应被淘汰"
     assert len(service._embedding_cache) == 5
+
+
+@pytest.mark.asyncio
+async def test_sync_provider_uses_bounded_worker_and_retains_cache(service):
+    import threading
+    from langchain_core.embeddings import Embeddings
+
+    calls = []
+    class SyncProvider(Embeddings):
+        def embed_documents(self, texts):
+            calls.append(threading.current_thread().name)
+            return [[1., 0.] for _ in texts]
+        def embed_query(self, text):
+            return self.embed_documents([text])[0]
+    service.embed_model = SyncProvider()
+    for _ in range(2):
+        assert await service._generate_embeddings(['sync']) == [[1., 0.]]
+    assert len(calls) == 1 and calls[0].startswith('rag-embedding')
+
+
+@pytest.mark.asyncio
+async def test_chroma_opens_existing_index_without_provider_and_rejects_wrong_dimensions(tmp_path, monkeypatch):
+    import chromadb
+    from chromadb.config import Settings
+    from chromadb.errors import InvalidArgumentError
+
+    for name in ('TEMP', 'TMP', 'SQLITE_TMPDIR'):
+        monkeypatch.setenv(name, str(tmp_path))
+    directory = tmp_path / 'chroma'
+    directory.mkdir()
+    relative = os.path.relpath(directory, Path.cwd()).replace('\\', '/')
+    with chromadb.PersistentClient(path=relative, settings=Settings(anonymized_telemetry=False)) as client:
+        collection = client.get_or_create_collection('rag_collection', metadata={'hnsw:space': 'cosine'})
+        collection.upsert(ids=['old'], documents=['fixture'], embeddings=[[1, 0]], metadatas=[{'user_id': 'owner'}])
+    embed = Mock(embed_documents=Mock(side_effect=AssertionError('Chroma initialization called an embedding provider')),
+                 aembed_documents=AsyncMock(side_effect=ConnectionError('provider unavailable')))
+    monkeypatch.setattr('app.rag.vector_store.get_chroma_config', lambda: {'persist_directory': str(directory)})
+    monkeypatch.setattr(VectorStoreService, '_instance', None)
+    vector = VectorStoreService(embed_model=embed)
+
+    try:
+        assert vector.get_collection_count() == 1
+        embed.embed_documents.assert_not_called()
+        embed.aembed_documents.assert_not_called()
+        with pytest.raises(ConnectionError, match='provider unavailable'):
+            await vector.search_documents('request without an available model', 'owner')
+        assert vector.get_collection_count() == 1
+
+        embed.aembed_documents.side_effect = None
+        embed.aembed_documents.return_value = [[1, 0, 0]]
+        with pytest.raises(InvalidArgumentError, match='dimension'):
+            await vector.search_documents('incorrect query dimension', 'owner')
+        with pytest.raises(InvalidArgumentError, match='dimension'):
+            await vector.upsert_document(['incorrect document dimension'], [{'user_id': 'owner'}], ['new'])
+        assert vector.get_collection_count() == 1
+    finally:
+        if vector._chroma_client is not None:
+            vector._chroma_client.close()

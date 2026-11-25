@@ -96,6 +96,7 @@ classifier:
 rag:
   # 是否启用 LLM 文档总结（false=轻量截断，延迟低；true=LLM总结，质量高）
   enable_summarize: true
+  query_expansion_enabled: false  # M3-14 本地评测后保留关闭
   # 截断模式下每篇文档最大字符数
   truncate_max_chars: 800
 
@@ -120,6 +121,13 @@ token_budget:
   image_tokens_per_msg: 3000
   # 历史回放单条消息最多保留的图片数，超出以 "[图片×N]" 占位
   max_history_images: 4
+
+# 同一任务共享的模型与工具预算。null 或空映射表示不启用对应限制。
+task_model_budget:
+  max_calls: null
+  max_tool_calls: null
+  max_tokens: null
+  cost_limits: {}
 
 # 工具按需加载配置
 tool_groups:
@@ -290,7 +298,7 @@ mcp_servers:
 
 # 安全配置（P2-3 安全护栏）
 security:
-  # send_email 每用户每小时发送上限（进程内滑动窗口；多进程部署需换 Redis）
+  # 助手邮件每用户每小时发送尝试上限，按 MySQL 受理记录计数
   email_rate_limit_per_hour: 10
 
 # 记忆压缩配置

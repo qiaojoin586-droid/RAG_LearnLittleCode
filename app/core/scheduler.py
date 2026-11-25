@@ -114,6 +114,15 @@ async def cleanup_expired_categories() -> int:
             raise
 
 
+async def cleanup_expired_approvals() -> None:
+    from app.ai_service.email_dispatch import maintain_email_dispatches
+    from app.ai_service.tool_approvals import expire_approvals
+    from app.db.database import async_session_factory
+
+    await expire_approvals(async_session_factory)
+    await maintain_email_dispatches(async_session_factory)
+
+
 def init_scheduler() -> None:
     """初始化并启动定时任务（仅在非 reload 模式下由 main.py 调用）"""
     scheduler.add_job(
@@ -148,6 +157,8 @@ def init_scheduler() -> None:
         replace_existing=True,
         misfire_grace_time=3600,
     )
+    scheduler.add_job(cleanup_expired_approvals, trigger=CronTrigger(minute='*/2'),
+                      id='cleanup_expired_approvals', replace_existing=True, max_instances=1)
     scheduler.start()
     logger.info(
         "定时任务调度器已启动（03:00 清理回收站过期笔记，"

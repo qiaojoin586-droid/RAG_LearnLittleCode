@@ -35,6 +35,12 @@ def load_prompt(prompt_name: str) -> str:
         FileNotFoundError: 提示词文件不存在
         KeyError: prompt_name 未在 prompt.yaml 中配置
     """
+    from app.model_config.snapshots import current_snapshot
+    if current_snapshot() is not None:
+        from app.model_config.registry import PROMPT_KEYS
+        from app.model_config.runtime import template_for
+        roles=[role for role,key in PROMPT_KEYS.items() if key==prompt_name]
+        if roles:return template_for(roles[0],'')
     # 检查缓存
     if prompt_name in _prompt_cache:
         return _prompt_cache[prompt_name]
@@ -77,6 +83,12 @@ def format_prompt(prompt_name: str, **kwargs) -> str:
         format_prompt("auto_tag", note_title="Python笔记", note_content="...")
     """
     template = load_prompt(prompt_name)
+    from app.model_config.snapshots import current_snapshot
+    if current_snapshot() is not None:
+        from app.model_config.registry import PROMPT_KEYS
+        from app.model_config.prompt_contracts import render
+        role=next(role for role,key in PROMPT_KEYS.items() if key==prompt_name)
+        return render(role,template,kwargs)
     return template.format(**kwargs)
 
 

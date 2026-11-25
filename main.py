@@ -59,6 +59,7 @@ class BackgroundInitManager:
         self.chat_model_thinking = None # 深度思考模型（思考模式开启，前端开关控制）
         self.embed_model = None
         self.vision_model = None
+        self.autocomplete_model = None  # AI 联机补全模型（轻量独立实例）
         self.note_service = None
         self.reorder_service = None
         self.rag_service = None  # RAG 服务（阶段 3 后创建）
@@ -124,9 +125,18 @@ class BackgroundInitManager:
     async def _init_models(self):
         """初始化 AI 模型（Chat + Embedding + Vision + Classifier + Plan）"""
         try:
+            from app.model_config.snapshots import load_snapshot
+            from app.db.database import async_session_factory
+            async with async_session_factory() as db:
+                if await load_snapshot(db) is not None:
+                    logger.info('模型从数据库发布按请求解析，跳过旧环境变量模型初始化')
+                    self.classifier_model=None
+                    self.plan_model=None
+                    return
             from app.utils.factory import (
                 create_chat_model, create_embed_model,
                 create_classifier_model, create_plan_model, create_vision_model,
+                create_autocomplete_model,
             )
             self.chat_model = create_chat_model(enable_thinking=False)  # 默认关闭思考
             try:
@@ -157,6 +167,16 @@ class BackgroundInitManager:
             except Exception as e:
                 logger.warning(f"Plan 模型初始化失败，Plan-Execute 不可用: {e}")
                 self.plan_model = None
+            # AI 联机补全模型（轻量，独立实例；AUTOCOMPLETE_ENABLED=false 时返回 None）
+            try:
+                self.autocomplete_model = create_autocomplete_model()
+                if self.autocomplete_model is None:
+                    logger.info("AI 联机补全已禁用（AUTOCOMPLETE_ENABLED=false）")
+                else:
+                    logger.info("补全模型初始化成功")
+            except Exception as e:
+                logger.warning(f"补全模型初始化失败，AI 联机补全不可用: {e}")
+                self.autocomplete_model = None
             logger.info("AI 模型初始化成功")
         except Exception as e:
             logger.warning(f"AI 模型初始化失败（部分功能不可用）: {e}")
@@ -171,6 +191,9 @@ class BackgroundInitManager:
             self.note_service = NoteService(
                 vector_store=vector_store,
                 chat_model=self.chat_model,
+                # ★ C5：补全模型必须在阶段 2 注入，漏掉则 ai_autocomplete 恒返回空
+                #（静默失效且无日志）
+                autocomplete_model=self.autocomplete_model,
             )
             logger.info("NoteService + ChromaDB 初始化成功")
         except Exception as e:
@@ -179,18 +202,20 @@ class BackgroundInitManager:
     async def _init_reranker(self):
         """初始化重排序模型（带 30 秒超时保护）"""
         try:
-            from sentence_transformers import CrossEncoder
             from app.utils.config import get_chroma_config
                 
-            config = get_chroma_config()
-            model_name = config.get("reranker", {}).get("model_name", "BAAI/bge-reranker-v2-m3")
+            config = get_chroma_config().get("reranker", {})
+            if not config.get("enabled", True):
+                self.reorder_service = None
+                logger.info("本地配置已关闭 RAG 重排")
+                return
+            model_name = config.get("model_name", "BAAI/bge-reranker-v2-m3")
                 
-            # 在线程池中加载模型（避免阻塞事件循环），带超时保护
-            loop = asyncio.get_event_loop()
-            self.reorder_service = await asyncio.wait_for(
-                loop.run_in_executor(None, lambda: CrossEncoder(model_name)),
-                timeout=30
-            )
+            def load_reranker():
+                from sentence_transformers import CrossEncoder
+                return CrossEncoder(model_name)
+
+            self.reorder_service = await asyncio.wait_for(asyncio.to_thread(load_reranker), timeout=30)
             logger.info(f"重排序模型初始化成功: {model_name}")
         except asyncio.TimeoutError:
             logger.warning("重排序模型初始化超时（30s），跳过。知识库重排序功能不可用。")
@@ -211,6 +236,7 @@ class BackgroundInitManager:
                 chat_model=self.chat_model,
                 rerank_model=self.reorder_service,
                 enable_summarize=rag_config.get("enable_summarize", False),
+                enable_published_expansion=rag_config.get("query_expansion_enabled") is True,
             )
             logger.info("RagService 实例创建成功")
         except Exception as e:
@@ -247,6 +273,17 @@ init_manager = BackgroundInitManager()
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    from app.rag.chroma_transport import validate_routes
+    from app.rag.maintenance_lock import local_vector_owner
+
+    validate_routes()
+    with local_vector_owner():
+        async with _application_lifespan(app):
+            yield
+
+
+@asynccontextmanager
+async def _application_lifespan(app: FastAPI):
     """
     应用生命周期管理
     
@@ -279,6 +316,20 @@ async def lifespan(app: FastAPI):
     # 3. 连接 Redis
     redis = await init_redis()
     app.state.redis = redis
+    from app.model_config.router import service as config_control
+    from app.model_config.outbox import ConfigOutboxWorker, CredentialRevocationWatcher
+    from app.db.database import async_session_factory
+    config_outbox=ConfigOutboxWorker(config_control,async_session_factory,redis=redis)
+    config_outbox.start()
+    credential_watcher = CredentialRevocationWatcher(async_session_factory, redis=redis)
+    credential_watcher.start()
+    from app.model_config.lifecycle import configured_worker
+    candidate_worker,candidate_engine=configured_worker(config_control,async_session_factory)
+    if candidate_worker:candidate_worker.start()
+    from app.user_memory.router import service as memory_control
+    from app.user_memory.jobs import MemoryWorker
+    memory_worker=MemoryWorker(memory_control,async_session_factory)
+    memory_worker.start()
 
     # 4. 创建测试用户（仅非生产环境；生产环境需显式 ENABLE_TEST_USER=true 才创建）
     app_env = _clean_env("APP_ENV", "development", ["development", "production"])
@@ -301,6 +352,21 @@ async def lifespan(app: FastAPI):
 
     asyncio.create_task(_run_init_and_mark_ready())
 
+    from app.ai_service.detached_worker import DetachedChatWorker
+    from app.routers.chat import stream_queued_chat
+    detached_worker = DetachedChatWorker(async_session_factory, stream_queued_chat)
+    detached_worker.start()
+
+    from app.rag.ingest_worker import KnowledgeIngestWorker
+    from app.rag.index_build_worker import IndexBuildWorker
+    from app.rag.note_index_worker import NoteIndexWorker
+    knowledge_worker = KnowledgeIngestWorker(async_session_factory)
+    note_index_worker = NoteIndexWorker(async_session_factory)
+    index_build_worker = IndexBuildWorker(config_control, async_session_factory)
+    knowledge_worker.start()
+    note_index_worker.start()
+    index_build_worker.start()
+
     # 5.1 后台初始化 MCP 工具（独立任务，与模型加载并行；失败仅降级，不影响主流程）
     asyncio.create_task(init_manager.init_mcp())
 
@@ -319,7 +385,18 @@ async def lifespan(app: FastAPI):
 
     # ===== 关闭阶段 =====
     logger.info("应用关闭中...")
+    from app.ai_service.detached_chat import stop_detached_chats
+    await detached_worker.stop()
+    await knowledge_worker.stop()
+    await note_index_worker.stop()
+    await index_build_worker.stop()
+    await stop_detached_chats()
     # 关闭 MCP 客户端（0.3.x 无持久连接，close 为幂等清理）
+    await config_outbox.stop()
+    await credential_watcher.stop()
+    if candidate_worker:await candidate_worker.stop()
+    if candidate_engine:await candidate_engine.dispose()
+    await memory_worker.stop()
     await init_manager.close_mcp()
     # 关闭定时任务调度器（wait=False 避免阻塞关闭流程）
     if not reload:
@@ -393,6 +470,7 @@ app.add_middleware(
     allow_credentials=allow_credentials,
     allow_methods=["*"],
     allow_headers=["*"],
+    expose_headers=["ETag", "X-Request-ID", "X-Workflow-Id", "X-Knowledge-Job-Id"],
 )
 
 
@@ -420,6 +498,8 @@ async def add_process_time_header(request: Request, call_next):
 
 # Prometheus 指标采集中间件（审查 P1-2；注意需在 CORS 中间件之后注册）
 app.add_middleware(MetricsMiddleware)
+from app.model_config.snapshots import SnapshotMiddleware
+app.add_middleware(SnapshotMiddleware)
 
 # 注册全局异常处理器
 register_exception_handlers(app)
@@ -459,6 +539,12 @@ app.include_router(usage.router, prefix=API_PREFIX, tags=["Usage"])
 app.include_router(ppt_router.router, prefix=API_PREFIX, tags=["PPT"])
 app.include_router(ppt_template_router.router, prefix=API_PREFIX, tags=["PPT"])
 app.include_router(tts_router.router, prefix=API_PREFIX, tags=["TTS"])
+from app.model_config.router import router as model_config_router, auth_router as model_config_auth_router
+app.include_router(model_config_router, prefix=API_PREFIX)
+app.include_router(model_config_auth_router, prefix=API_PREFIX)
+from app.user_memory.router import router as memory_router,MemoryPrivacyMiddleware
+app.include_router(memory_router,prefix=API_PREFIX)
+app.add_middleware(MemoryPrivacyMiddleware)
 
 # 静态文件服务（头像访问）
 # 确保头像存储目录存在

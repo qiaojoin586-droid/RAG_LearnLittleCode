@@ -314,6 +314,74 @@ def create_plan_model():
         )
 
 
+def create_autocomplete_model():
+    """
+    创建 AI 联机补全专用 Chat 模型（轻量、快速、关闭思考）
+
+    环境变量：
+    - AUTOCOMPLETE_ENABLED: 总开关（false → 返回 None，补全功能静默关闭）
+    - AUTOCOMPLETE_MODEL:   模型名，可独立于 CLASSIFIER_MODEL / PLAN_MODEL 配置；
+                            须与 config/pricing.yaml 条目名一字不差，否则成本恒为 0
+    - AUTOCOMPLETE_TIMEOUT: 调用超时秒数（默认 5.0）
+    - AUTOCOMPLETE_MAX_TOKENS: 生成 token 上限（默认 200，字符上限由后处理保证）
+
+    设计文档：docs/AI联机补全功能设计优化方案.md §3.3
+
+    Returns:
+        LangChain ChatModel 实例；功能关闭 / 缺 Key 时返回 None
+    """
+    if os.getenv("AUTOCOMPLETE_ENABLED", "true").strip().lower() != "true":
+        logger.info("AI 补全功能已禁用（AUTOCOMPLETE_ENABLED=false）")
+        return None
+
+    provider = get_provider()
+
+    if provider == ModelProvider.DASHSCOPE:
+        from langchain_openai import ChatOpenAI
+
+        model_name = os.getenv("AUTOCOMPLETE_MODEL", "qwen3.7-flash").strip()
+        api_key = os.getenv("DASHSCOPE_API_KEY", "")
+        if not api_key:
+            # F6：补全是高频、可降级、非关键功能 —— 缺 Key 时直接关闭，
+            # 不回退主模型（否则会以 120s 超时 + 主模型单价静默烧钱）。
+            logger.warning("DASHSCOPE_API_KEY 未配置，AI 联机补全已关闭")
+            return None
+
+        timeout = float(os.getenv("AUTOCOMPLETE_TIMEOUT", "5.0"))
+        max_tokens = int(os.getenv("AUTOCOMPLETE_MAX_TOKENS", "200"))
+        logger.info(f"创建补全模型: {model_name} (DashScope, timeout={timeout}s)")
+        return ChatOpenAI(
+            model=model_name,
+            api_key=api_key,
+            base_url=DASHSCOPE_BASE_URL,
+            streaming=False,          # 非流式（补全为短文本）
+            http_async_client=get_shared_async_client(),
+            request_timeout=timeout,
+            max_tokens=max_tokens,    # token 上限；字符上限由 _postprocess_completion 保证
+            extra_body={"enable_thinking": False},  # 关闭思考（加速）
+            callbacks=[TRACE_CALLBACK],
+        )
+
+    if provider == ModelProvider.OLLAMA:
+        from langchain_ollama import ChatOllama
+
+        model_name = os.getenv("AUTOCOMPLETE_MODEL", "qwen3:0.6b")
+        base_url = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
+        timeout = float(os.getenv("AUTOCOMPLETE_TIMEOUT", "5.0"))
+        logger.info(f"创建补全模型: {model_name} (Ollama)")
+        return ChatOllama(
+            model=model_name,
+            base_url=base_url,
+            timeout=timeout,
+            streaming=False,
+            callbacks=[TRACE_CALLBACK],
+        )
+
+    # 显式报错，禁止用 else 兜底（设计文档附录 G 的 F16）：新增 provider 时若漏加
+    # 分支，会静默构造出打错端点的客户端（表现为连接失败/超时，极难排查）。
+    raise ValueError(f"create_autocomplete_model 暂不支持的 provider: {provider.value}")
+
+
 # ============================================================
 # DashScope（阿里云百炼）实现
 # ============================================================
