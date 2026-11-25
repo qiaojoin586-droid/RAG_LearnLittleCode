@@ -13,6 +13,7 @@
 
 import { useMemo } from 'react';
 import ReactMarkdown from 'react-markdown';
+import type { ElementContent } from 'hast';
 import remarkGfm from 'remark-gfm';
 import remarkMath from 'remark-math';
 import rehypeHighlight from 'rehype-highlight';
@@ -22,12 +23,24 @@ import ReferencedNoteCards from './ReferencedNoteCards';
 import { parseSearchResults } from '../../utils/noteSearchParser';
 import { parseReferencedNotes } from '../../utils/noteReferenceParser';
 
+function linkLabel(nodes: ElementContent[]): string {
+  return nodes.map((node) => {
+    if (node.type === 'text') return node.value;
+    if (node.type === 'element') return linkLabel(node.children);
+    return '';
+  }).join('');
+}
+
 /** Markdown 片段渲染（prefix/suffix 与整段内容共用同一套插件配置） */
 function MarkdownBlock({ content }: { content: string }) {
   return (
     <ReactMarkdown
       remarkPlugins={[remarkGfm, remarkMath]}
       rehypePlugins={[rehypeHighlight, rehypeKatex]}
+      components={{
+        a: ({ node, children, href, title }) => /^\[?E\d+\]?$/.test(linkLabel(node?.children ?? []).trim())
+          ? <span>{children}</span> : <a href={href} title={title}>{children}</a>,
+      }}
     >
       {content}
     </ReactMarkdown>

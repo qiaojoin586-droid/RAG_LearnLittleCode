@@ -21,6 +21,7 @@ import { parseReferencedNotes } from '../../utils/noteReferenceParser';
 import PptDownloadCard from './PptDownloadCard';
 import TtsAudioCard from './TtsAudioCard';
 import AttachmentViewer from './AttachmentViewer';
+import AnswerCitations from './AnswerCitations';
 
 /** 工具名 → 中文展示名（简单路径补转发工具事件后的状态指示，§7） */
 const TOOL_NAME_MAP: Record<string, string> = {
@@ -154,6 +155,9 @@ export default function MessageBubble({ msg, isLast, isStreaming, userAvatar, pl
           /* 用户消息：引用笔记卡片化（v2）——解析引用块，问题保留纯文本样式，
              引用笔记以卡片展示（卡片为白底，在蓝色气泡上仍可读） */
           <UserMessageContent content={msg.content || '...'} />
+        )}
+        {!isUser && !!msg.citation_ids?.length && (
+          <AnswerCitations session={msg.session_id} message={msg.id} ids={msg.citation_ids} />
         )}
         {/* 工具调用状态指示（简单路径补转发工具事件后生效，§6.3/§7；中文名映射） */}
         {!isUser && isLast && plan.currentTool && (

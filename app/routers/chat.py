@@ -11,11 +11,20 @@
 """
 
 import asyncio
+from anyio import move_on_after
+from app.model_config.runtime import model_for, template_for
+from app.model_config.snapshots import current_snapshot
+from app.model_config.task_budget import ModelBudgetDenied, current_model_budget
+from app.model_config.context_budget import ModelContextExceeded
+from app.model_config.prompt_contracts import FIXED_SAFETY
+from contextlib import aclosing
 import json
 import os
+import re
 from typing import Optional
+from uuid import UUID
 
-from fastapi import APIRouter, Depends, Query, UploadFile, File, Header
+from fastapi import APIRouter, Depends, Query, UploadFile, File, Header, Request, Response
 from fastapi.responses import StreamingResponse, FileResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -24,10 +33,10 @@ from app.core.success_response import success_response
 from app.core.rate_limit import rate_limit
 from app.core.task_runner import spawn_background_task
 from app.core.failed_response import BusinessError, ErrorCode
-from app.core.model_trace import set_trace_context, clear_trace_context, new_request_id
+from app.core.model_trace import set_trace_context, new_request_id
 from app.db.database import get_db, async_session_factory
 from app.schemas.chat import (
-    QueryRequest, RAGRequest, ChatSessionListResponse,
+    ApprovalDecision, QueryRequest, RAGRequest, ChatSessionListResponse,
     MessageListResponse, SessionTitleUpdate, UploadResponse,
 )
 from app.utils.auth_utils import get_current_user_id
@@ -35,9 +44,18 @@ from app.utils.time_utils import to_utc_iso
 from app.utils.file_handler import read_upload_limited
 from app.ai_service.chat_route import ChatRouteContext
 from app.ai_service.chat_graph import stream_chat_graph
+from app.ai_service.detached_chat import cancel_detached_chat, find_detached_chat
+from app.ai_service.detached_worker import enqueue_chat, lock_chat_admission
+from app.ai_service.tool_operations import ToolTurn, authorize_turn
+from app.ai_service.tool_approvals import decide_approval, list_approvals
+from app.ai_service.email_dispatch import list_email_operations, mark_email_received
+from app.ai_service.workflows import ChatWorkflow, read_workflow
+from app.ai_service.workflow_events import RAG_NOTICES, WorkflowJournal, event_frame, read_workflow_events
 from app.services.chat_service import ChatService
 from app.services.database_session_manager import DatabaseSessionManager
 from app.services.chat_attachment_service import ChatAttachmentService
+from app.rag.citations import POLICY as CITATION_POLICY, CitationTurn, confirm_citations, current_citations, read_citation
+from app.rag.rag_service import RagService, RetrievalUnavailable
 
 router = APIRouter()
 
@@ -48,6 +66,10 @@ chat_attachment_service = ChatAttachmentService()
 
 # LLM 流式响应超时时间（秒）
 LLM_STREAM_TIMEOUT = int(os.getenv("LLM_STREAM_TIMEOUT", "60"))
+_CASUAL_GREETING = re.compile(
+    r'(?:你好|您好|大家好|早上好|下午好|晚上好|嗨|哈喽|谢谢你?|hello|hi|hey|thanks|thank\s+you)[\s!！?？.。~～,，]*',
+    re.IGNORECASE,
+)
 
 # SSE 单用户最大并发连接数
 # 防止恶意用户通过大量 SSE 连接耗尽服务器资源
@@ -56,7 +78,7 @@ SSE_MAX_CONNECTIONS_PER_USER = 3
 _sse_active_counts: dict[str, int] = {}
 
 
-async def _acquire_sse_slot(user_id: str) -> bool:
+async def _acquire_sse_slot(user_id: str, *, background: bool = False) -> bool:
     """
     获取 SSE 连接槽位（Redis 计数优先，多进程部署天然生效）
 
@@ -68,13 +90,12 @@ async def _acquire_sse_slot(user_id: str) -> bool:
         redis = get_redis()
         key = f"sse_conn:{user_id}"
         count = await redis.incr(key)
-        if count == 1:
-            # TTL 兜底：连接异常释放时自动清理（120s > SSE 正常生命周期）
-            await redis.expire(key, 120)
         if count > SSE_MAX_CONNECTIONS_PER_USER:
             await redis.decr(key)  # 回退计数
             logger.warning(f"SSE 连接数超限（Redis）: user={user_id[:8]}, count={count}")
             return False
+        if count == 1 or background:
+            await redis.expire(key, 240 if background else 120)
         return True
     except Exception as e:
         # Redis 故障降级：进程内计数
@@ -99,6 +120,22 @@ async def _release_sse_slot(user_id: str) -> None:
     _sse_active_counts[user_id] = max(0, _sse_active_counts.get(user_id, 1) - 1)
 
 
+class ChatStreamingResponse(StreamingResponse):
+    def __init__(self, stream, headers, release_slot):
+        super().__init__(stream, media_type='text/event-stream', headers=headers)
+        self.release_slot = release_slot
+
+    async def __call__(self, scope, receive, send):
+        try:
+            await super().__call__(scope, receive, send)
+        finally:
+            try:
+                with move_on_after(5, shield=True):
+                    await self.body_iterator.aclose()
+            finally:
+                await self.release_slot()
+
+
 def _estimate_attachment_tokens(attachments) -> int:
     """
     估算当前消息附件的 token 消耗（用于历史配额扣减，优先保证当前消息）
@@ -120,6 +157,7 @@ def _estimate_attachment_tokens(attachments) -> int:
 @router.post("/chat/query", summary="Agent 流式对话", dependencies=[Depends(rate_limit(endpoint_limit=10))])
 async def chat_query(
     data: QueryRequest,
+    request: Request,
     user_id: str = Depends(get_current_user_id),
 ):
     """
@@ -133,66 +171,168 @@ async def chat_query(
     导致后续异步任务中 db.execute() 报 NoneType 错误。
     所有数据库操作均使用独立 session。
     """
-    from main import init_manager
-    from app.db.database import async_session_factory
-    
-    # ===== 附件处理（加载归属校验 + 绑定会话 + 随消息保存元数据）=====
-    attachments = []
-    attachment_meta_json = None
-    attachment_names = []
-    user_msg_id = None
+    background = data.continue_on_disconnect
+    snapshot = current_snapshot()
+    if background and snapshot is None:
+        raise BusinessError(50305, message='后台对话需要先发布模型配置', http_status=503)
+    if background and await request.is_disconnected():
+        return Response(status_code=204)
+    if not await _acquire_sse_slot(user_id, background=background):
+        async def limit_stream():
+            yield event_frame({'type': 'error', 'content': f'并发连接数已达上限（最多 {SSE_MAX_CONNECTIONS_PER_USER} 个）'})
+        return StreamingResponse(limit_stream(), media_type='text/event-stream')
+
+    released = handed_off = False
+
+    async def release_slot():
+        nonlocal released
+        if not released:
+            released = True
+            with move_on_after(2, shield=True):
+                await _release_sse_slot(user_id)
 
     try:
-        # 使用独立 session 获取或创建会话（不依赖请求级 db）
-        async with async_session_factory() as db:
-            session_id = await chat_service.get_or_create_session(db, user_id, data.session_id)  # 获取Session_id,如果已经存在就返回，否则创建一个新的session
-            # 设置模型调用 trace 上下文（P0）：请求 ID + 用户 + 会话，供 factory 层回调读取
-            set_trace_context(new_request_id(), user_id=user_id, session_id=session_id, stage="chat")
-            # 附件归属校验（不属于当前用户的 ID 直接忽略）+ 绑定会话（脱离孤儿状态）
-            if data.attachment_ids:
-                attachments = await chat_attachment_service.get_owned_list(
-                    db, user_id, data.attachment_ids
-                )
-                if attachments:
-                    await chat_attachment_service.bind_session(
-                        db, user_id, [a.file_id for a in attachments], session_id
-                    )
-            await db.commit()  # 提交事务，确保会话创建成功
+        headers = {'Cache-Control': 'no-store', 'Connection': 'keep-alive', 'X-Accel-Buffering': 'no'}
+        try:
+            session_id, message_id, attachments, workflow_id = await _persist_chat_turn(
+                data, user_id, snapshot.release_id if background else None,
+            )
+        except BusinessError as error:
+            if background:
+                raise
+            async def user_message_error(code, message):
+                yield event_frame({'type': 'error', 'code': code, 'content': message})
+            return StreamingResponse(user_message_error(error.code, error.message), media_type='text/event-stream')
+        except Exception as error:
+            logger.warning(f'会话消息写入失败: error_type={type(error).__name__}')
+            if background:
+                raise BusinessError(ErrorCode.INTERNAL_ERROR, message='会话创建失败，请稍后重试', http_status=500) from None
+            async def err_stream():
+                yield event_frame({'type': 'error', 'content': '会话创建失败，请稍后重试'})
+            return StreamingResponse(err_stream(), media_type='text/event-stream')
 
-        # 附件元数据（冗余存储到 chat_messages.attachments_json，供历史回显）
-        if attachments:
-            attachment_meta_json = [
-                {
-                    "file_id": a.file_id,
-                    "file_type": a.file_type,
-                    "original_name": a.original_name,
-                    "file_size": a.file_size,
-                    "mime_type": a.mime_type,
-                    "width": a.width,
-                    "height": a.height,
-                    "duration_sec": a.duration_sec,
-                }
-                for a in attachments
-            ]
-            attachment_names = [a.original_name for a in attachments]
+        set_trace_context(new_request_id(), user_id=user_id, session_id=session_id, stage='chat')
+        if workflow_id is not None:
+            headers['X-Workflow-Id'] = workflow_id
+            stream = _queued_chat_frames(workflow_id, user_id)
+        else:
+            stream = _accepted_chat_frames(data, user_id, session_id, message_id, attachments)
+        response = ChatStreamingResponse(stream, headers, release_slot)
+        handed_off = True
+        return response
+    finally:
+        if not handed_off:
+            await release_slot()
 
-        # 用户消息内容兜底（空文本 + 附件 → 占位内容，避免空串入库）
-        user_content = data.message
-        if not user_content.strip() and attachment_meta_json:
-            user_content = "[视频]" if any(a.file_type == "video" for a in attachments) else "[图片]"
 
-        # 保存用户消息（使用独立 session + commit，确保持久化）
-        user_msg_id = await chat_service.save_message_with_commit(
-            session_id, user_id, "user", user_content,
-            data.idempotency_key,
-            attachments_json=attachment_meta_json,
-        )
-    except Exception as e:
-        logger.error(f"会话/消息初始化失败: {type(e).__name__}: {e}", exc_info=True)
-        # 对外统一文案（审查 M15：内部异常细节仅入日志，不直出客户端）
-        async def err_stream():
-            yield f"data: {json.dumps({'type': 'error', 'content': '会话创建失败，请稍后重试'})}\n\n"
-        return StreamingResponse(err_stream(), media_type="text/event-stream")
+async def _accepted_chat_frames(data, user_id, session_id, message_id, attachments):
+    yield event_frame({'type': 'thinking', 'stage': 'accepted', 'content': '已收到问题，正在准备回答。'})
+    try:
+        stream = await _prepare_chat_stream(data, user_id, session_id, message_id, attachments)
+    except (ModelBudgetDenied, ModelContextExceeded) as error:
+        yield event_frame(error.stream_event())
+        return
+    except Exception as error:
+        logger.warning(f'聊天准备失败: {type(error).__name__}')
+        yield event_frame({'type': 'error', 'content': '生成失败，请稍后重试'})
+        return
+    async with aclosing(stream):
+        async for frame in stream:
+            yield frame
+
+
+def _retrieval_service(manager):
+    service = getattr(manager, 'rag_service', None)
+    if service is not None:
+        return service
+    from app.rag.vector_store import VectorStoreService
+    from app.utils.config import get_rag_config
+    # The keyword index can already serve requests during vector initialization.
+    vectors = VectorStoreService() if manager.stage2_complete.is_set() else None
+    config = get_rag_config()
+    return RagService(vectors, chat_model=manager.chat_model, rerank_model=getattr(manager, 'reorder_service', None),
+                      enable_summarize=config.get('enable_summarize', False),
+                      enable_published_expansion=config.get('query_expansion_enabled') is True)
+
+
+async def _persist_chat_turn(data, user_id, release_id):
+    async with async_session_factory() as db:
+        async with db.begin():
+            if release_id is not None:
+                await lock_chat_admission(db, user_id)
+            session_id = await chat_service.get_or_create_session(db, user_id, data.session_id)
+            attachments = await chat_attachment_service.get_owned_list(db, user_id, data.attachment_ids)
+            attachment_ids = [item.file_id for item in attachments]
+            await chat_attachment_service.bind_session(db, user_id, attachment_ids, session_id)
+            metadata = [{
+                'file_id': item.file_id, 'file_type': item.file_type, 'original_name': item.original_name,
+                'file_size': item.file_size, 'mime_type': item.mime_type, 'width': item.width,
+                'height': item.height, 'duration_sec': item.duration_sec,
+            } for item in attachments]
+            attachment_only = bool(attachments) and not data.message.strip()
+            content = data.message
+            if attachment_only:
+                content = '[视频]' if any(item.file_type == 'video' for item in attachments) else '[图片]'
+            message = await chat_service.session_manager.add_message(
+                db, session_id, user_id, 'user', content, data.idempotency_key,
+                attachments_json=metadata or None, cache_immediately=False,
+            )
+            workflow_id = None
+            if release_id is not None:
+                await chat_attachment_service.bind_message(db, user_id, attachment_ids, session_id, message.id)
+                workflow_id = await enqueue_chat(db, user_id, ToolTurn(session_id, message.id), release_id,
+                                                 thinking=data.enable_thinking, attachment_only=attachment_only,
+                                                 allow_actions=data.allow_background_actions)
+        await chat_service.session_manager.cache_message(session_id, message)
+        return session_id, message.id, attachments, workflow_id
+
+
+async def _queued_chat_frames(workflow_id, user_id):
+    # The first response carries the durable ID. A remote or backlogged Worker
+    # can be followed through the same cursor API after this relay closes.
+    yield ': accepted\n\n'
+    for _ in range(15):
+        run = find_detached_chat(workflow_id, user_id)
+        if run is not None:
+            async with aclosing(run.frames()) as frames:
+                async for frame in frames:
+                    yield frame
+            return
+        await asyncio.sleep(0.1)
+
+
+async def stream_queued_chat(job, user_id, session_id):
+    from datetime import timezone
+    from app.models.chat import ChatMessage
+    from sqlalchemy import select
+
+    async with async_session_factory() as db:
+        message = (await db.execute(select(ChatMessage).where(
+            ChatMessage.id == job.turn_message_id, ChatMessage.session_id == session_id, ChatMessage.role == 'user',
+        ))).scalar_one()
+        file_ids = [item['file_id'] for item in (message.attachments_json or [])]
+        attachments = await chat_attachment_service.get_owned_list(db, user_id, file_ids)
+        if len(attachments) != len(file_ids) or any(item.session_id != session_id for item in attachments):
+            raise BusinessError(ErrorCode.INVALID_PARAMETER, message='任务附件已不可用', http_status=409,
+                                data={'reason': 'DETACHED_ATTACHMENT_UNAVAILABLE'})
+    # Rehydrate only from the original message and its authoritative attachments.
+    data = QueryRequest(message='' if job.options['attachment_only'] else message.content,
+                        attachment_ids=file_ids, enable_thinking=job.options['thinking'],
+                        continue_on_disconnect=True, memory_mode='off')
+    prompt_time = job.created_at.replace(tzinfo=timezone.utc).astimezone().strftime('%Y-%m-%d %H:%M:%S')
+    stream = await _prepare_chat_stream(data, user_id, session_id, job.turn_message_id, attachments, job.workflow,
+                                        prompt_time=prompt_time, parent_deadline=job.deadline)
+    async with aclosing(stream):
+        async for frame in stream:
+            yield frame
+
+
+async def _prepare_chat_stream(data, user_id, session_id, user_msg_id, attachments, admitted=None, *,
+                               prompt_time=None, parent_deadline=None):
+    from main import init_manager
+
+    background = admitted is not None
+    attachment_names = [attachment.original_name for attachment in attachments]
     
     # 获取 AI 模型（等待后台初始化完成）
     if not init_manager.stage1_complete.is_set():
@@ -200,9 +340,11 @@ async def chat_query(
         try:
             await asyncio.wait_for(init_manager.stage1_complete.wait(), timeout=30)
         except asyncio.TimeoutError:
+            if admitted is not None:
+                await admitted.finish('failed', 'DETACHED_MODEL_INIT_TIMEOUT')
             async def timeout_stream():
                 yield f"data: {json.dumps({'type': 'error', 'content': 'AI 模型初始化超时，请稍后重试'})}\n\n"
-            return StreamingResponse(timeout_stream(), media_type="text/event-stream")
+            return timeout_stream()
     
     # 模型选择（两个实例分工）：
     # - chat_model：文本任务模型（会话标题 / RAG / 记忆摘要），始终用主模型，不受附件影响
@@ -212,42 +354,62 @@ async def chat_query(
     #     默认              → 主模型
     # ⚠️ 附件 + 深度思考：深度思考对附件场景自动失效（视觉模型不支持思考，
     #    且 qwen3.8-max thinking + 多模态实测首 token 延迟 >60s 必超时）
-    chat_model = init_manager.chat_model
+    chat_model = model_for('chat', init_manager.chat_model)
     if attachments:
-        vision_model = getattr(init_manager, "vision_model", None)
+        vision_model = model_for('vision', getattr(init_manager, "vision_model", None))
         if vision_model:
             agent_model = vision_model
             logger.info(f"附件请求使用视觉模型: {getattr(vision_model, 'model_name', 'vision_model')} (user={user_id[:8]})")
         else:
-            agent_model = chat_model
+            agent_model = chat_model if current_snapshot() is None else None
             logger.warning(f"视觉模型不可用，附件理解降级主模型: user={user_id[:8]}")
-    elif data.enable_thinking and getattr(init_manager, "chat_model_thinking", None):
-        agent_model = init_manager.chat_model_thinking
+    elif data.enable_thinking:
+        agent_model = model_for('chat_thinking', init_manager.chat_model_thinking)
+        if agent_model is None and current_snapshot() is None:
+            agent_model=chat_model
         logger.debug(f"深度思考模式已开启: user={user_id[:8]}")
     else:
         agent_model = chat_model
 
-    if not chat_model or not agent_model:
+    if not agent_model:
+        if admitted is not None:
+            await admitted.finish('failed', 'DETACHED_MODEL_UNAVAILABLE')
         # 模型未初始化，返回错误 SSE
         async def error_stream():
             yield f"data: {json.dumps({'type': 'error', 'content': 'AI 模型未初始化'})}\n\n"
-        return StreamingResponse(error_stream(), media_type="text/event-stream")
+        return error_stream()
     
-    # SSE 并发连接数检查（在昂贵操作之前拦截；Redis 计数，多进程部署天然生效）
-    if not await _acquire_sse_slot(user_id):
-        async def limit_stream():
-            yield f"data: {json.dumps({'type': 'error', 'content': '并发连接数已达上限（最多 %d 个），请关闭多余标签页后重试' % SSE_MAX_CONNECTIONS_PER_USER})}\n\n"
-        return StreamingResponse(limit_stream(), media_type="text/event-stream")
-    
+    memory_snapshot=None
+    if not background and data.memory_mode!='off':
+        from app.user_memory.router import service as user_memory
+        try:
+            async with async_session_factory() as memory_db:
+                memory_budget=2048
+                pinned=current_snapshot()
+                if pinned is not None:
+                    # Freeze one fragment for all possible assistant consumers.
+                    ids={agent_model.profile_id}
+                    for role in ('planner','reflection','synthesize'):
+                        binding=pinned.manifest['resolved_static_bindings'].get(role)
+                        if binding and binding['enabled']:ids.add(binding['profile_revision_id'])
+                    memory_budget=min([2048,*[max(0,((pinned.profiles[ident]['context_window'] or 8192)-
+                        (pinned.profiles[ident]['max_output_tokens'] or 2048)-1024)//5) for ident in ids]])
+                memory_snapshot=await user_memory.snapshot(memory_db,user_id,budget=memory_budget)
+        except BusinessError:
+            raise
+        except Exception:
+            from app.user_memory.service import error as memory_error
+            memory_error(50340,'MEMORY_STORE_UNAVAILABLE',503)
     # 标题生成模型（D 项：用轻量模型 flash，避免与主 Agent 抢 qwen3.7-max 并发导致
     # DashScope 连接不稳定；flash 不可用时降级主模型）。
     # 标题生成本身推迟到主 Agent 完成后执行（见 generate_stream 的 done 事件之后）
-    title_model = getattr(init_manager, "classifier_model", None) or chat_model
+    title_model = model_for('session_title', getattr(init_manager, "classifier_model", None) or chat_model)
     
     # ===== 并行执行 RAG 检索 + 记忆压缩（两者无数据依赖）=====
     from datetime import datetime
+    prompt_time = prompt_time or datetime.now().strftime('%Y-%m-%d %H:%M:%S')
     from app.utils.prompt_loader import load_prompt
-    from app.utils.config import get_agent_config, get_rag_config
+    from app.utils.config import get_agent_config
     from langchain_core.messages import HumanMessage, AIMessage
     from app.services.token_budget import TokenBudget
     from app.services.memory_compressor import MemoryCompressor, check_and_summarize
@@ -255,60 +417,38 @@ async def chat_query(
     
     rag_context = ""
     rag_sources = []
+    rag_status = None
     compressed_messages = []
     
     async def _run_rag():
-        """RAG 检索协程（含路由判断：与知识库无关的查询跳过 RAG）"""
-        nonlocal rag_context, rag_sources
-        if not data.message.strip():
-            return  # 仅附件消息：无查询文本，跳过 RAG
+        """Skip retrieval for empty text and greetings without a substantive request."""
+        nonlocal rag_context, rag_sources, rag_status
+        message = data.message.strip()
+        if not message or _CASUAL_GREETING.fullmatch(message):
+            return
         try:
-            await asyncio.wait_for(init_manager.stage2_complete.wait(), timeout=5)
-            
-            from app.rag.vector_store import VectorStoreService
-            
-            vector_store = VectorStoreService()
-            
-            # 路由判断：先检查查询与知识库的相关性
-            route_threshold = float(os.getenv("RAG_ROUTE_THRESHOLD", "0.5"))
-            try:
-                route_distance = await vector_store.compute_route_score(data.message)
-                if route_distance > route_threshold:
-                    logger.debug(f"路由判断跳过 RAG: distance={route_distance:.3f} > threshold={route_threshold}")
-                    return  # 与知识库无关，跳过 RAG
-            except Exception as e:
-                logger.debug(f"路由判断失败，继续执行 RAG: {e}")
-            
-            # 复用 init_manager 中的 RagService 实例，避免每次请求重建
-            rag_service = getattr(init_manager, 'rag_service', None)
-            if rag_service is None:
-                from app.rag.rag_service import RagService
-                reranker = getattr(init_manager, 'reorder_service', None)
-                rag_config = get_rag_config()
-                rag_service = RagService(
-                    vector_store=vector_store,
-                    chat_model=chat_model,
-                    rerank_model=reranker,
-                    enable_summarize=rag_config.get("enable_summarize", False),
-                )
-            
-            rag_result = await rag_service.query(
+            rag_result = await _retrieval_service(init_manager).query(
                 query_text=data.message,
                 user_id=user_id,
                 top_k=3,
                 use_hyde=False,
+                deadline=parent_deadline,
             )
             rag_context = rag_result.get("context", "")
             rag_sources = rag_result.get("sources", [])
+            rag_status = rag_result.get("status")
             
             if rag_context:
                 logger.info(f"RAG 检索成功: {len(rag_sources)} 个来源, context 长度={len(rag_context)}")
             else:
                 logger.debug("RAG 检索无结果")
-        except asyncio.TimeoutError:
-            logger.debug("RAG 服务未就绪，跳过知识库检索")
+        except (ModelBudgetDenied, ModelContextExceeded):
+            raise
         except Exception as e:
-            logger.warning(f"RAG 查询失败，跳过: {e}")
+            if isinstance(e, BusinessError) and e.http_status in (401, 403):
+                raise
+            rag_status = 'error'
+            logger.warning(f"RAG 查询失败，跳过: {type(e).__name__}")
     
     async def _run_memory_compression():
         """记忆压缩协程"""
@@ -320,7 +460,7 @@ async def chat_query(
             # 并行执行两次 DB 查询（使用独立 session）
             async def _get_messages():
                 async with async_session_factory() as db:
-                    return await session_manager.get_all_messages(db, session_id)
+                    return await session_manager.get_all_messages(db, session_id, before_message_id=user_msg_id)
             
             async def _get_summary():
                 async with async_session_factory() as db:
@@ -338,8 +478,8 @@ async def chat_query(
                 }
                 for m in all_msgs
             ]
-            existing_summary = summary_obj.summary_text if summary_obj else ""
-            prev_messages = all_messages[:-1] if all_messages else []
+            existing_summary = summary_obj.summary_text if summary_obj and summary_obj.last_message_id < user_msg_id else ""
+            prev_messages = all_messages
 
             # 预加载历史附件图片 base64（最近 2 条用户消息，支持"上一张图里…"追问）
             await _preload_history_images(prev_messages)
@@ -375,10 +515,12 @@ async def chat_query(
                 f"has_summary={bool(existing_summary)}"
             )
             
+            if background:
+                return
             # 异步触发里程碑摘要检查（非阻塞）
             threshold = mc_config.get("summarize_threshold", 40)
             min_interval = mc_config.get("min_summary_interval", 20)
-            spawn_background_task(
+            summary_task = spawn_background_task(
                 check_and_summarize(
                     chat_model=chat_model,
                     session_id=session_id,
@@ -387,13 +529,16 @@ async def chat_query(
                 ),
                 name="chat_summary_check",
             )
+            if summary_task is None:
+                logger.warning("可选历史摘要任务因容量不足跳过")
         except Exception as e:
             logger.warning(f"记忆压缩管线失败，回退到简单截断: {e}")
             max_rounds = get_agent_config().get("max_history_rounds", 20)
             try:
-                recent = await chat_service.session_manager.get_recent_messages(
-                    session_id, limit=max_rounds * 2
-                )
+                async with async_session_factory() as db:
+                    earlier = await session_manager.get_all_messages(db, session_id, before_message_id=user_msg_id)
+                recent = [{'role': item.role, 'content': item.content, 'attachments_json': item.attachments_json}
+                          for item in earlier[-max_rounds * 2:]]
                 for msg in recent:
                     role = msg.get("role", "")
                     content = msg.get("content", "")
@@ -467,9 +612,8 @@ async def chat_query(
     await asyncio.gather(_run_rag(), _run_memory_compression())
     
     # ===== 解析用户引用的笔记（从消息中提取结构化引用块）=====
-    import re as _re
     referenced_notes_text = ""
-    _ref_match = _re.search(r'<referenced_notes>\s*(.*?)\s*</referenced_notes>', data.message, _re.DOTALL)
+    _ref_match = re.search(r'<referenced_notes>\s*(.*?)\s*</referenced_notes>', data.message, re.DOTALL)
     if _ref_match:
         ref_block = _ref_match.group(1).strip()
         # 解析每行："- ID: xxx | 标题: yyy"
@@ -486,7 +630,7 @@ async def chat_query(
     # 与 <referenced_notes> 同段解析，注入 system_prompt 让 LLM 把 template_id
     # 填入 generate_ppt_tool（工具内强校验归属，双保险）
     ppt_template_text = ""
-    _pt_match = _re.search(r'<ppt_template>\s*(.*?)\s*</ppt_template>', data.message, _re.DOTALL)
+    _pt_match = re.search(r'<ppt_template>\s*(.*?)\s*</ppt_template>', data.message, re.DOTALL)
     if _pt_match:
         pt_block = _pt_match.group(1).strip()
         pt_lines = [l.strip() for l in pt_block.split('\n') if l.strip().startswith('- ID:')]
@@ -501,35 +645,47 @@ async def chat_query(
     # 构建 system_prompt（注入 RAG 上下文 + 引用笔记 ID）
     try:
         system_prompt = load_prompt("main")
-        system_prompt = system_prompt.replace("{current_time}", datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
+        system_prompt = system_prompt.replace("{current_time}", prompt_time)
     except Exception:
         system_prompt = "你是一个智能笔记助手，帮助用户管理知识、检索信息和回答问题。"
     
-    if rag_context:
-        system_prompt += (
-            "\n\n以下是从知识库和笔记中检索到的相关内容，请在回答时优先参考：\n"
-            "<reference>\n"
-            f"{rag_context}\n"
-            "</reference>"
-        )
-    
-    # 注入引用笔记 ID 到 system_prompt（让 Agent 知道可以直接操作的笔记）
-    if referenced_notes_text:
-        system_prompt += referenced_notes_text
-
-    # 注入 PPT 模板选择到 system_prompt（v1.4，§6.5）
-    if ppt_template_text:
-        system_prompt += ppt_template_text
+    from app.ai_service.context_composer import set_assistant_data
+    set_assistant_data(rag=rag_context,references=referenced_notes_text,ppt=ppt_template_text,memory=memory_snapshot)
+    if current_snapshot() is not None:
+        role=getattr(agent_model,'role_key','chat')
+        task=template_for(role,'',current_time=prompt_time,
+                          question=data.message,user_message=data.message)
+        if task:compressed_messages.append(HumanMessage(content=task))
+        system_prompt=''
+    else:
+        system_prompt=FIXED_SAFETY+'\n\n'+system_prompt
+        if rag_sources:
+            system_prompt += '\n' + CITATION_POLICY
     
     # ===== SSE 流式响应生成器 =====
     async def generate_stream():
         """生成 SSE 流式响应（RAG + 记忆压缩已并行完成，直接生成）"""
-        # SSE 连接计数由 _acquire_sse_slot 在请求进入时完成（Redis 优先）
+        workflow = admitted
+        heartbeat = journal = None
+        finished = False
+        citation_turn = CitationTurn(rag_context, rag_sources, delivered=current_snapshot() is None,
+                                     owner=user_id, session_factory=async_session_factory)
+        current_citations.set(citation_turn)
         try:
+            turn = ToolTurn(session_id, user_msg_id)
+            snapshot = current_snapshot()
+            if workflow is None:
+                workflow = await ChatWorkflow.start(async_session_factory, user_id, turn, snapshot.release_id if snapshot else None)
+                heartbeat = asyncio.create_task(workflow.heartbeat(), name='chat_workflow_heartbeat')
+            journal = await WorkflowJournal.resume(workflow) if background else WorkflowJournal(workflow)
             # 发送思考事件
-            if rag_context:
-                yield f"data: {json.dumps({'type': 'thinking', 'stage': 'rag', 'content': f'已从知识库检索到 {len(rag_sources)} 个相关文档'})}\n\n"
-            yield f"data: {json.dumps({'type': 'thinking', 'stage': 'processing', 'content': '正在思考...'})}\n\n"
+            if rag_status in RAG_NOTICES:
+                yield await journal.live_frame({'type': 'thinking', 'stage': 'rag',
+                                                'status': rag_status, 'content': RAG_NOTICES[rag_status]})
+            elif rag_context:
+                yield await journal.live_frame({'type': 'thinking', 'stage': 'rag',
+                    'content': f'已从知识库检索到 {len(rag_sources)} 个相关文档'})
+            yield await journal.live_frame({'type': 'thinking', 'stage': 'processing', 'content': '正在思考...'})
 
             # ===== 附件多模态内容组装（图片压缩 / 视频抽帧，CPU 密集 → 线程池）=====
             attachment_content = []
@@ -537,7 +693,7 @@ async def chat_query(
                 from app.ai_service.multimodal_processor import build_attachment_blocks_async
                 if data.enable_thinking:
                     yield f"data: {json.dumps({'type': 'thinking', 'stage': 'attachment', 'content': '深度思考对附件场景自动关闭（视觉模型理解附件）'})}\n\n"
-                if getattr(init_manager, "vision_model", None) is None:
+                if model_for('vision',getattr(init_manager, "vision_model", None)) is None:
                     yield f"data: {json.dumps({'type': 'thinking', 'stage': 'attachment', 'content': '视觉模型未就绪，当前只能基于文字回复'})}\n\n"
                 if any(a.file_type == "video" for a in attachments):
                     yield f"data: {json.dumps({'type': 'thinking', 'stage': 'attachment', 'content': '正在解析视频（抽帧）...'})}\n\n"
@@ -573,8 +729,8 @@ async def chat_query(
             # 事件流经总线产出，SSE 契约与改造前一致
             ctx = ChatRouteContext(
                 agent_model=agent_model,
-                plan_model=getattr(init_manager, "plan_model", None),
-                classifier_model=getattr(init_manager, "classifier_model", None),
+                plan_model=model_for('planner', getattr(init_manager, "plan_model", None)),
+                classifier_model=model_for('classifier', getattr(init_manager, "classifier_model", None)),
                 user_id=user_id,
                 user_message=data.message,
                 system_prompt=system_prompt,
@@ -591,54 +747,81 @@ async def chat_query(
                 # 调用可达 50-90s，整轮预算按模式放宽（与 plan_timeout 的 *2 策略对齐）
                 react_timeout=LLM_STREAM_TIMEOUT * 2 if data.enable_thinking else LLM_STREAM_TIMEOUT,
                 plan_timeout=LLM_STREAM_TIMEOUT * 2,
+                tool_turn=turn,
+                workflow=workflow,
             )
 
             # 执行 + 事件转发（error 后不发 done、不保存回复，与改造前一致）
             accumulated = ""
             errored = False
-            ppt_file_info = None   # tool_file 事件（持久化到消息附件，历史回放恢复下载卡片）
-            async for event in stream_chat_graph(ctx):
-                if event.get("type") == "response":
-                    accumulated += event.get("content", "")
-                elif event.get("type") == "error":
-                    errored = True
-                elif event.get("type") == "tool_file":
-                    # 补全 AttachmentMeta 必填字段（file_type/original_name），
-                    # 否则历史接口 MessageListResponse 校验 500（v1.6 修复）
-                    if event.get("name") == "text_to_speech":
-                        # TTS 语音：audio_url 随消息持久化，历史回放恢复播放/下载卡片
-                        ppt_file_info = {
-                            "file_id": event.get("file_id"),
-                            "file_type": "tts",
-                            "original_name": "语音朗读",
-                            "download_url": event.get("audio_url"),
-                            "duration_estimate": event.get("duration_estimate"),
-                        }
-                    else:
-                        ppt_file_info = {
-                            "file_id": event.get("file_id"),
-                            "file_type": "ppt",
-                            "original_name": event.get("title") or "讲解PPT",
-                            "download_url": event.get("download_url"),
-                            "title": event.get("title"),
-                            "slide_count": event.get("slide_count"),
-                        }
-                yield f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
+            generated_files = {}
+            model_budget = current_model_budget.get()
+            async with aclosing(stream_chat_graph(ctx)) as _owned_stream_0:
+                async for event in _owned_stream_0:
+                    if model_budget is not None:
+                        model_budget.check_open()
+                    if event.get("type") == "response":
+                        accumulated += event.get("content", "")
+                    elif event.get("type") == "error":
+                        errored = True
+                        reason = event.get('reason') if event.get('code') == ErrorCode.MODEL_BUDGET_EXCEEDED else None
+                        await workflow.finish('failed', reason or 'AGENT_EXECUTION_FAILED')
+                        finished = True
+                    elif event.get("type") == "tool_file":
+                        # 补全 AttachmentMeta 必填字段（file_type/original_name），
+                        # 否则历史接口 MessageListResponse 校验 500（v1.6 修复）
+                        if event.get("name") == "text_to_speech":
+                            # TTS 语音：audio_url 随消息持久化，历史回放恢复播放/下载卡片
+                            ppt_file_info = {
+                                "file_id": event.get("file_id"),
+                                "file_type": "tts",
+                                "original_name": "语音朗读",
+                                "download_url": event.get("audio_url"),
+                                "duration_estimate": event.get("duration_estimate"),
+                            }
+                        else:
+                            ppt_file_info = {
+                                "file_id": event.get("file_id"),
+                                "file_type": "ppt",
+                                "original_name": event.get("title") or "讲解PPT",
+                                "download_url": event.get("download_url"),
+                                "title": event.get("title"),
+                                "slide_count": event.get("slide_count"),
+                            }
+                        generated_files[ppt_file_info['file_id']] = ppt_file_info
+                    yield await journal.live_frame(event)
 
+            if model_budget is not None:
+                model_budget.check_open()
             if errored:
                 # 与现状一致：error 事件后不发送 done、不保存回复
                 return
 
             # 异步保存 AI 回复到数据库 + Redis（非阻塞，不延迟 done 事件）
             # 回复保存成功后回填附件 message_id（绑定消息，禁止单独删除）
+            citations = {}
+            reply_id = None
             if accumulated:
                 async def _save_reply_and_bind():
-                    await chat_service.save_message_with_commit(
+                    nonlocal reply_id, citations
+                    async def persist_reply_links(db, message):
+                        nonlocal citations
+                        if background:
+                            await authorize_turn(db, user_id, turn)
+                        citations = await confirm_citations(db, user_id, citation_turn.cited(accumulated))
+                        if citations:
+                            message.citations_json = citations
+                        await workflow.succeed_in(db, message.id)
+                        if not background and memory_snapshot is not None and user_msg_id:
+                            from app.user_memory.jobs import MemoryJobs
+                            await MemoryJobs(user_memory).record_success(db,user_id,new_request_id(),user_msg_id)
+                    reply_id = await chat_service.save_message_with_commit(
                         session_id, user_id, "assistant", accumulated,
                         # PPT 下载信息随消息持久化（复用 attachments_json，切换页面后下载卡片仍可恢复）
-                        attachments_json=[ppt_file_info] if ppt_file_info else None,
+                        attachments_json=list(generated_files.values()) or None,
+                        before_message_commit=persist_reply_links, require_commit=True,
                     )
-                    if user_msg_id and attachments:
+                    if not background and user_msg_id and attachments:
                         try:
                             async with async_session_factory() as db:
                                 await chat_attachment_service.bind_message(
@@ -650,46 +833,61 @@ async def chat_query(
                         except Exception as e:
                             logger.warning(f"附件绑定消息失败: {e}")
 
-                spawn_background_task(_save_reply_and_bind(), name="chat_save_reply")
+                # The final done event acknowledges a committed reply, not merely
+                # admission to an in-memory background queue.
+                await _save_reply_and_bind()
+            else:
+                async with async_session_factory() as db:
+                    async with db.begin():
+                        if background:
+                            await authorize_turn(db, user_id, turn)
+                        await workflow.succeed_in(db)
+            finished = True
             
             # 发送完成事件（包含 RAG 来源信息）
-            done_data = {'type': 'done', 'session_id': session_id}
-            if rag_sources:
-                done_data['sources'] = [
-                    {'content': s.get('content', '')[:100], 'source': s.get('source', '')}
-                    for s in rag_sources[:3]
-                ]
-            yield f"data: {json.dumps(done_data)}\n\n"
+            done_data = {'type': 'done', 'session_id': session_id, 'workflow_id': workflow.id}
+            if citations:
+                done_data.update(reply_message_id=reply_id, citation_ids=list(citations))
+            yield await journal.live_frame(done_data)
+
+            if background:
+                return
 
             # 主 Agent 完成后再生成标题（D 项：与主流程错峰执行，消除并发挤
             # DashScope 连接导致的 Connection error；轻量模型调用快，
             # 标题更新延迟几秒对用户无感。error 路径不触发——失败时标题无意义）
-            spawn_background_task(
+            title_task = spawn_background_task(
                 chat_service.generate_and_update_title(
                     session_id, data.message, title_model,
                     attachment_names=attachment_names or None,
                 ),
                 name="chat_title_generate",
             )
+            if title_task is None:
+                logger.warning("可选会话标题任务因容量不足跳过")
 
+        except (ModelBudgetDenied, ModelContextExceeded) as e:
+            if workflow is not None and not finished:
+                await workflow.finish('failed', e.data['reason'])
+                finished = True
+            yield event_frame(e.stream_event())
         except Exception as e:
+            if workflow is not None and not finished:
+                await workflow.finish('failed', 'CHAT_WORKFLOW_FAILURE')
+                finished = True
             logger.error(f"AI 对话流生成失败: {type(e).__name__}: {e}", exc_info=True)
             # 对外统一文案（审查 M15：内部异常细节仅入日志，不直出客户端）
-            yield f"data: {json.dumps({'type': 'error', 'content': '生成失败，请稍后重试'})}\n\n"
+            yield event_frame({'type': 'error', 'content': '生成失败，请稍后重试'})
         finally:
-            # SSE 连接计数释放（生成器结束时释放，无论正常完成还是异常）
-            await _release_sse_slot(user_id)
-            logger.debug(f"SSE 连接 -1: user={user_id[:8]}")
-    
-    return StreamingResponse(
-        generate_stream(),
-        media_type="text/event-stream",
-        headers={
-            "Cache-Control": "no-cache",
-            "Connection": "keep-alive",
-            "X-Accel-Buffering": "no",  # 禁用 Nginx 缓冲  #TODO  这为什么要禁用Nginx缓冲
-        }
-    )
+            current_citations.set(None)
+            if heartbeat is not None:
+                heartbeat.cancel()
+            with move_on_after(2, shield=True):
+                if heartbeat is not None:
+                    await asyncio.gather(heartbeat, return_exceptions=True)
+                if admitted is None and workflow is not None and not finished:
+                    await workflow.finish('cancelled', 'STREAM_CLOSED')
+    return generate_stream()
 
 
 @router.post("/chat/rag", summary="RAG 查询", dependencies=[Depends(rate_limit(endpoint_limit=10))])
@@ -700,54 +898,47 @@ async def rag_query(
     """
     RAG 知识库查询接口
     
-    执行完整的 RAG 管线：HyDE → 双源检索 → 重排序 → 总结。
+    使用原问题进行向量和关键词检索，融合后重排并组装证据。
     """
     from main import init_manager
     
-    # 等待 VectorStore 初始化完成
-    if not init_manager.stage2_complete.is_set():
-        try:
-            await asyncio.wait_for(init_manager.stage2_complete.wait(), timeout=10)
-        except asyncio.TimeoutError:
-            return success_response(data={
-                "answer": "知识库服务尚未就绪，请稍后重试",
-                "sources": [],
-            })
-    
     try:
-        from app.rag.vector_store import VectorStoreService
-        from app.rag.rag_service import RagService
-        from app.utils.config import get_rag_config
-        
-        vector_store = VectorStoreService()
-        chat_model = init_manager.chat_model
-        reranker = getattr(init_manager, 'reorder_service', None)
-        rag_config = get_rag_config()
-        
-        rag_service = RagService(
-            vector_store=vector_store,
-            chat_model=chat_model,
-            rerank_model=reranker,
-            enable_summarize=rag_config.get("enable_summarize", False),
-        )
-        
-        result = await rag_service.query(
+        result = await _retrieval_service(init_manager).query(
             query_text=data.query,
             user_id=user_id,
             top_k=data.top_k,
             use_hyde=data.use_hyde,
         )
+        model_budget = current_model_budget.get()
+        if model_budget is not None:
+            model_budget.check_open()
         
         return success_response(data={
             "answer": result.get("context", ""),
             "sources": result.get("sources", []),
+            "status": result["status"],
+            "failed_sources": result["failed_sources"],
+            "recall_methods": result["recall_methods"],
+            "retrieval_policy_revision_id": result["retrieval_policy_revision_id"],
+            "index_snapshot": result["index_snapshot"],
+            "degraded_stages": result.get("degraded_stages", []),
+            "query_expansion": result["query_expansion"],
+            "timings_ms": result.get("timings_ms", {}),
+            "rerank_status": result.get("rerank_status", "unavailable"),
         })
+    except (ModelBudgetDenied, ModelContextExceeded):
+        raise
+    except RetrievalUnavailable as error:
+        raise BusinessError(ErrorCode.RAG_UNAVAILABLE, http_status=503,
+                            data={'status': 'error', 'failed_sources': error.failed_sources,
+                                  'timings_ms': error.timings_ms}) from error
+    except BusinessError:
+        raise
     except Exception as e:
-        logger.error(f"RAG 查询失败: {type(e).__name__}: {e}", exc_info=True)
+        logger.error(f"RAG 查询失败: {type(e).__name__}")
         # 审查 M3/M15：不再把错误吞进 200 成功响应；对外统一文案走全局异常处理器
         raise BusinessError(
-            code=ErrorCode.LLM_CALL_FAILED,
-            message="RAG 查询失败，请稍后重试",
+            code=ErrorCode.RAG_UNAVAILABLE, http_status=503, data={'status': 'error'},
         )
 
 
@@ -891,6 +1082,75 @@ async def list_sessions(
     return success_response(data={"sessions": [_to_dict(s) for s in sessions]})
 
 
+@router.get('/chat/sessions/{session_id}/approvals', summary='读取本会话的待确认写入')
+async def get_approvals(session_id: UUID, response: Response, user_id: str = Depends(get_current_user_id)):
+    response.headers['Cache-Control'] = 'private, no-store'
+    async with async_session_factory() as db:
+        return success_response(data=await list_approvals(db, user_id, str(session_id)))
+
+
+@router.post('/chat/approvals/{operation_id}', summary='确认或拒绝指定写入',
+             dependencies=[Depends(rate_limit(endpoint_limit=20))])
+async def post_approval(operation_id: UUID, data: ApprovalDecision, response: Response,
+                        user_id: str = Depends(get_current_user_id)):
+    from app.routers.note_router import _get_note_service
+    from app.services.review_service import ReviewService
+
+    def configured_email_service():
+        from main import init_manager
+
+        return init_manager.email_service
+
+    response.headers['Cache-Control'] = 'private, no-store'
+    return success_response(data=await decide_approval(async_session_factory, user_id, str(operation_id),
+                            data.preview_hash, data.decision, _get_note_service(), ReviewService(),
+                            email_service_factory=configured_email_service))
+
+
+@router.get('/chat/sessions/{session_id}/email-operations', summary='读取本会话的邮件发送结果')
+async def get_email_operations(session_id: UUID, response: Response, user_id: str = Depends(get_current_user_id)):
+    response.headers['Cache-Control'] = 'private, no-store'
+    async with async_session_factory() as db:
+        return success_response(data=await list_email_operations(db, user_id, str(session_id)))
+
+
+@router.post('/chat/approvals/{operation_id}/email-received', summary='记录已核实收件',
+             dependencies=[Depends(rate_limit(endpoint_limit=20))])
+async def post_email_received(operation_id: UUID, response: Response, user_id: str = Depends(get_current_user_id)):
+    response.headers['Cache-Control'] = 'private, no-store'
+    return success_response(data=await mark_email_received(async_session_factory, user_id, str(operation_id)))
+
+
+@router.get("/chat/workflows/{workflow_id}", summary="读取对话运行检查点")
+async def get_workflow(workflow_id: UUID, response: Response, user_id: str = Depends(get_current_user_id)):
+    response.headers['Cache-Control'] = 'no-store'
+    async with async_session_factory() as db:
+        return success_response(data=await read_workflow(db, user_id, str(workflow_id)))
+
+
+@router.post("/chat/workflows/{workflow_id}/cancel", summary="停止后台对话")
+async def cancel_workflow(
+    workflow_id: UUID,
+    user_id: str = Depends(get_current_user_id),
+    limited=Depends(rate_limit(endpoint_limit=20)),
+):
+    return success_response(data=await cancel_detached_chat(async_session_factory, str(workflow_id), user_id))
+
+
+@router.get("/chat/workflows/{workflow_id}/events", summary="按序号补读对话事件",
+            dependencies=[Depends(rate_limit(endpoint_limit=60))])
+async def get_workflow_events(
+    workflow_id: UUID,
+    response: Response,
+    after: int = Query(0, ge=0),
+    limit: int = Query(50, ge=1, le=100),
+    user_id: str = Depends(get_current_user_id),
+):
+    response.headers['Cache-Control'] = 'private, no-store'
+    async with async_session_factory() as db:
+        return success_response(data=await read_workflow_events(db, user_id, str(workflow_id), after, limit))
+
+
 @router.delete("/chat/sessions/{session_id}", summary="删除会话")
 async def delete_session(
     session_id: str,
@@ -948,6 +1208,13 @@ async def get_messages(
         has_more=has_more,
         next_cursor=next_cursor,
     ).model_dump())
+
+
+@router.get('/chat/{session_id}/messages/{message_id}/citations/{citation_id}', summary='查看回答引用的原文')
+async def get_reply_citation(session_id: str, message_id: int, citation_id: str, response: Response,
+                             user_id: str = Depends(get_current_user_id), db: AsyncSession = Depends(get_db)):
+    response.headers['Cache-Control'] = 'private, no-store'
+    return success_response(data=await read_citation(db, user_id, session_id, message_id, citation_id))
 
 
 @router.put("/chat/{session_id}/title", summary="修改会话标题")
